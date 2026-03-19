@@ -60,7 +60,7 @@ class TrajectoryVideoGenerator:
             total_reward += reward
             
             if terminated or truncated:
-                break
+                pass  # Keep rendering
         
         return frames, total_reward
     
@@ -258,7 +258,8 @@ def generate_dummy_trajectories(num_pairs=10, segment_length=50):
             obs, _, terminated, truncated, _ = env.step(action)
             
             if terminated or truncated:
-                break
+                obs, _ = env.reset()  # Reset instead of breaking
+                # 
         
         # Trajectory B
         states_b = []
@@ -272,7 +273,8 @@ def generate_dummy_trajectories(num_pairs=10, segment_length=50):
             obs, _, terminated, truncated, _ = env.step(action)
             
             if terminated or truncated:
-                break
+                obs, _ = env.reset()  # Reset instead of breaking
+                # 
         
         pair = {
             'states_a': np.array(states_a),
