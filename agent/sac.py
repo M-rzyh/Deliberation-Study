@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import math
 import utils
 import hydra
+from omegaconf import DictConfig, OmegaConf
 
 from agent import Agent
 from agent.critic import DoubleQCritic
@@ -57,10 +58,14 @@ class SACAgent(Agent):
         self.actor_betas = actor_betas
         self.alpha_lr = alpha_lr
         
+        if not isinstance(critic_cfg, DictConfig):
+            critic_cfg = OmegaConf.create(critic_cfg)
         self.critic = hydra.utils.instantiate(critic_cfg).to(self.device)
         self.critic_target = hydra.utils.instantiate(critic_cfg).to(
             self.device)
         self.critic_target.load_state_dict(self.critic.state_dict())
+        if not isinstance(actor_cfg, DictConfig):
+            actor_cfg = OmegaConf.create(actor_cfg)
         self.actor = hydra.utils.instantiate(actor_cfg).to(self.device)
         self.log_alpha = torch.tensor(np.log(init_temperature)).to(self.device)
         self.log_alpha.requires_grad = True

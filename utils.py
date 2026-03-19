@@ -100,12 +100,16 @@ class eval_mode(object):
     def __enter__(self):
         self.prev_states = []
         for model in self.models:
-            self.prev_states.append(model.training)
-            model.train(False)
+            if hasattr(model, 'training'):
+                self.prev_states.append(model.training)
+                model.train(False)
+            else:
+                self.prev_states.append(None)
 
     def __exit__(self, *args):
         for model, state in zip(self.models, self.prev_states):
-            model.train(state)
+            if state is not None and hasattr(model, 'train'):
+                model.train(state)
         return False
 
 

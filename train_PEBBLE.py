@@ -52,7 +52,7 @@ class Workspace(object):
             self.work_dir,
             save_tb=cfg.log_save_tb,
             log_frequency=cfg.log_frequency,
-            agent=cfg.agent.name)
+            agent="sac")
 
         self.clock = get_clock()  # shared TB at $COMPARE_RUN_DIR/common_tb
         
@@ -67,13 +67,13 @@ class Workspace(object):
         else:
             self.env = utils.make_env(cfg)
         
-        cfg.agent.params.obs_dim = self.env.observation_space.shape[0]
-        cfg.agent.params.action_dim = self.env.action_space.shape[0]
-        cfg.agent.params.action_range = [
+        cfg.agent.agent.obs_dim = self.env.observation_space.shape[0]
+        cfg.agent.agent.action_dim = self.env.action_space.shape[0]
+        cfg.agent.agent.action_range = [
             float(self.env.action_space.low.min()),
             float(self.env.action_space.high.max())
         ]
-        self.agent = hydra.utils.instantiate(cfg.agent)
+        self.agent = hydra.utils.instantiate(cfg.agent.agent)
 
         self.replay_buffer = ReplayBuffer(
             self.env.observation_space.shape,
@@ -114,7 +114,7 @@ class Workspace(object):
         
         for episode in range(self.cfg.num_eval_episodes):
             obs = self.env.reset()
-            self.agent.reset()
+            # self.agent.reset()  # Not needed
             done = False
             episode_reward = 0
             true_episode_reward = 0
@@ -296,7 +296,7 @@ class Workspace(object):
                         self.step)
                 
                 obs = self.env.reset()
-                self.agent.reset()
+                # self.agent.reset()  # Not needed
                 done = False
                 episode_reward = 0
                 avg_train_true_return.append(true_episode_reward)
@@ -421,11 +421,52 @@ class Workspace(object):
             
         self.agent.save(self.work_dir, self.step)
         self.reward_model.save(self.work_dir, self.step)
-        
-@hydra.main(config_path='config/train_PEBBLE.yaml', strict=True)
+    
+@hydra.main(config_path='config', config_name='train_PEBBLE', version_base=None)
 def main(cfg):
     workspace = Workspace(cfg)
     workspace.run()
 
 if __name__ == '__main__':
     main()
+
+# At the end of your training script
+from trajectory_video_generator import TrajectoryVideoGenerator
+
+def export_comparisons_for_ui(reward_model, output_dir='../preference_ui/static/videos', num_comparisons=50):
+    """Export trajectory pairs as videos for UI"""
+    
+    # Get trajectory segments from reward model
+    sa_t_1, sa_t_2, r_t_1, r_t_2 = reward_model.get_queries(mb_size=num_comparisons)
+    
+    trajectory_pairs = []
+    
+    for i in range(num_comparisons):
+        # Extract states and actions
+        segment_a = sa_t_1[i]  # shape: (segment_length, obs_dim + action_dim)
+        segment_b = sa_t_2[i]
+        
+        # Split into states and actions
+        states_a = segment_a[:, :reward_model.ds]  # first ds dimensions
+        actions_a = segment_a[:, reward_model.ds:]  # rest are actions
+        
+        states_b = segment_b[:, :reward_model.ds]
+        actions_b = segment_b[:, reward_model.ds:]
+        
+        pair = {
+            'states_a': states_a,
+            'actions_a': actions_a,
+            'states_b': states_b,
+            'actions_b': actions_b
+        }
+        
+        trajectory_pairs.append(pair)
+    
+    # Generate videos
+    generator = TrajectoryVideoGenerator(env_name='Walker2d-v4')
+    generator.generate_comparison_videos(trajectory_pairs, output_dir=output_dir)
+    generator.close()
+    
+    print(f"✓ Exported {num_comparisons} comparisons to {output_dir}")
+
+# Call after training
