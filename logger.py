@@ -166,9 +166,15 @@ class Logger(object):
             frames = frames.unsqueeze(0)
             self._sw.add_video(key, frames, step, fps=30)
 
+#    def _try_sw_log_histogram(self, key, histogram, step):
+#        if self._sw is not None:
+#            self._sw.add_histogram(key, histogram, step)
+#
     def _try_sw_log_histogram(self, key, histogram, step):
-        if self._sw is not None:
+        try:
             self._sw.add_histogram(key, histogram, step)
+        except Exception:
+            return
 
     def log(self, key, value, step, n=1, log_frequency=1):
         if not self._should_log(step, log_frequency):

@@ -1,0 +1,17 @@
+/home/ghayourn/miniconda3/envs/bpref39/lib/python3.9/site-packages/hydra/_internal/config_loader.py:10: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  from pkg_resources import (
+workspace: /home/ghayourn/BPref/exp/walker_walk/H1024_L2_lr0.0005/teacher_b-1_g1_m0_s0_e0/label_smooth_0.0/schedule_0/PEBBLE_init1000_unsup9000_inter20000_maxfeed500_seg50_acttanh_Rlr0.0003_Rbatch50_Rupdate50_en3_sampleNone_large_batch10_seed12345
+[2026-01-24 22:52:26,154][absl][INFO] - MUJOCO_GL=osmesa, attempting to import specified OpenGL backend.
+[2026-01-24 22:52:26,361][OpenGL.acceleratesupport][INFO] - No OpenGL_accelerate module loaded: No module named 'OpenGL_accelerate'
+[2026-01-24 22:52:26,911][absl][INFO] - MuJoCo library version is: 2.3.7
+/home/ghayourn/miniconda3/envs/bpref39/lib/python3.9/site-packages/gym/spaces/box.py:73: UserWarning: [33mWARN: Box bound precision lowered by casting to float32[0m
+  logger.warn(
+Terminated
+/home/ghayourn/miniconda3/envs/bpref39/lib/python3.9/site-packages/hydra/_internal/config_loader.py:10: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  from pkg_resources import (
+workspace: /home/ghayourn/BPref/exp/walker_walk/H1024_L2_lr0.0005/teacher_b-1_g1_m0_s0_e0/label_smooth_0.0/schedule_0/PEBBLE_init1000_unsup9000_inter20000_maxfeed500_seg50_acttanh_Rlr0.0003_Rbatch50_Rupdate50_en3_sampleNone_large_batch10_seed23451
+[2026-01-24 22:55:07,681][absl][INFO] - MUJOCO_GL=osmesa, attempting to import specified OpenGL backend.
+[2026-01-24 22:55:07,885][OpenGL.acceleratesupport][INFO] - No OpenGL_accelerate module loaded: No module named 'OpenGL_accelerate'
+[2026-01-24 22:55:08,450][absl][INFO] - MuJoCo library version is: 2.3.7
+/home/ghayourn/miniconda3/envs/bpref39/lib/python3.9/site-packages/gym/spaces/box.py:73: UserWarning: [33mWARN: Box bound precision lowered by casting to float32[0m
+  logger.warn(

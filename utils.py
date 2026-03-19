@@ -6,9 +6,12 @@ import os
 import random
 import math
 import dmc2gym
-import metaworld
-import metaworld.envs.mujoco.env_dict as _env_dict
-
+#import metaworld
+#import metaworld.envs.mujoco.env_dict as _env_dict
+try:
+    import metaworld.envs.mujoco.env_dict as _env_dict
+except Exception:
+    _env_dict = None
 from collections import deque
 from gym.wrappers.time_limit import TimeLimit
 from rlkit.envs.wrappers import NormalizedBoxEnv

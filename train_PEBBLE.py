@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
+import os
+import sys
+sys.path.append(os.path.expanduser("~/compare_utils"))
+from compare_logger import algo_dir, get_clock, Timer
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import copy
 import math
-import os
-import sys
+#import os
+#import sys
 import time
 import pickle as pkl
 import tqdm
@@ -21,9 +26,27 @@ import hydra
 
 class Workspace(object):
     def __init__(self, cfg):
-        self.work_dir = os.getcwd()
+        # self.work_dir = os.getcwd()
+        # print(f'workspace: {self.work_dir}')
+        
+        print("\n" + "="*60)
+        print("ACTUAL CONFIG BEING USED:")
+        print("="*60)
+        print(f"env: {cfg.env}")
+        print(f"device: {cfg.device}")
+        print(f"num_train_steps: {cfg.num_train_steps}")
+        print(f"num_unsup_steps: {cfg.num_unsup_steps}")
+        print(f"num_interact: {cfg.num_interact}")
+        print(f"max_feedback: {cfg.max_feedback}")
+        print(f"reward_batch: {cfg.reward_batch}")
+        print(f"reward_update: {cfg.reward_update}")
+        print(f"feed_type: {cfg.feed_type}")
+        print("="*60 + "\n")
+        
+        # Put PEBBLE logs under $COMPARE_RUN_DIR/pebble
+        self.work_dir = algo_dir("pebble")
         print(f'workspace: {self.work_dir}')
-
+        
         self.cfg = cfg
         self.logger = Logger(
             self.work_dir,
@@ -31,6 +54,8 @@ class Workspace(object):
             log_frequency=cfg.log_frequency,
             agent=cfg.agent.name)
 
+        self.clock = get_clock()  # shared TB at $COMPARE_RUN_DIR/common_tb
+        
         utils.set_seed_everywhere(cfg.seed)
         self.device = torch.device(cfg.device)
         self.log_success = False
@@ -60,6 +85,10 @@ class Workspace(object):
         self.total_feedback = 0
         self.labeled_feedback = 0
         self.step = 0
+        self.last_pref_sec = 0.0
+        self.last_pref_pairs = 0
+        self.pref_time_so_far_sec = 0.0
+        self.last_logged_labeled_feedback = 0
 
         # instantiating the reward model
         self.reward_model = RewardModel(
@@ -125,32 +154,80 @@ class Workspace(object):
         self.logger.dump(self.step)
     
     def learn_reward(self, first_flag=0):
-                
-        # get feedbacks
+        # --- preference query generation + labeling timing ---
         labeled_queries, noisy_queries = 0, 0
-        if first_flag == 1:
-            # if it is first time to get feedback, need to use random sampling
-            labeled_queries = self.reward_model.uniform_sampling()
-        else:
-            if self.cfg.feed_type == 0:
+        with Timer() as  t_pref:
+            if first_flag == 1:
                 labeled_queries = self.reward_model.uniform_sampling()
-            elif self.cfg.feed_type == 1:
-                labeled_queries = self.reward_model.disagreement_sampling()
-            elif self.cfg.feed_type == 2:
-                labeled_queries = self.reward_model.entropy_sampling()
-            elif self.cfg.feed_type == 3:
-                labeled_queries = self.reward_model.kcenter_sampling()
-            elif self.cfg.feed_type == 4:
-                labeled_queries = self.reward_model.kcenter_disagree_sampling()
-            elif self.cfg.feed_type == 5:
-                labeled_queries = self.reward_model.kcenter_entropy_sampling()
             else:
-                raise NotImplementedError
+                if self.cfg.feed_type == 0:
+                    labeled_queries = self.reward_model.uniform_sampling()
+                elif self.cfg.feed_type == 1:
+                    labeled_queries = self.reward_model.disagreement_sampling()
+                elif self.cfg.feed_type == 2:
+                    labeled_queries = self.reward_model.entropy_sampling()
+                elif self.cfg.feed_type == 3:
+                    labeled_queries = self.reward_model.kcenter_sampling()
+                elif self.cfg.feed_type == 4:
+                    labeled_queries = self.reward_model.kcenter_disagree_sampling()
+                elif self.cfg.feed_type == 5:
+                    labeled_queries = self.reward_model.kcenter_entropy_sampling()
+                else:
+                    raise NotImplementedError
+
+        pref_sec = t_pref.dt
+        
+        # # get feedbacks
+        # labeled_queries, noisy_queries = 0, 0
+        # if first_flag == 1:
+        #     # if it is first time to get feedback, need to use random sampling
+        #     labeled_queries = self.reward_model.uniform_sampling()
+        # else:
+        #     if self.cfg.feed_type == 0:
+        #         labeled_queries = self.reward_model.uniform_sampling()
+        #     elif self.cfg.feed_type == 1:
+        #         labeled_queries = self.reward_model.disagreement_sampling()
+        #     elif self.cfg.feed_type == 2:
+        #         labeled_queries = self.reward_model.entropy_sampling()
+        #     elif self.cfg.feed_type == 3:
+        #         labeled_queries = self.reward_model.kcenter_sampling()
+        #     elif self.cfg.feed_type == 4:
+        #         labeled_queries = self.reward_model.kcenter_disagree_sampling()
+        #     elif self.cfg.feed_type == 5:
+        #         labeled_queries = self.reward_model.kcenter_entropy_sampling()
+        #     else:
+        #         raise NotImplementedError
         
         self.total_feedback += self.reward_model.mb_size
         self.labeled_feedback += labeled_queries
+        query_number = self.total_feedback // self.cfg.reward_batch
+        print(f"Total preference labels so far: {self.total_feedback}, Query number: {query_number}")
+        
+        seg_len = int(self.cfg.segment)             # L
+        pairs = int(labeled_queries)               # number of preference labels created now
+        segment_steps = 2 * seg_len * pairs        # 2*L per preference
+        
+        self.last_pref_sec = float(pref_sec)
+        self.last_pref_pairs = int(pairs)
+        self.pref_time_so_far_sec = (self.last_pref_sec / max(1, self.last_pref_pairs)) * self.labeled_feedback
+        
+        # self.clock.log_scalar("clock/pebble_pref_batch_seconds", pref_sec, self.step)
+        # self.clock.log_scalar("samples/pebble_pref_pairs", float(pairs), self.step)
+        # self.clock.log_scalar("samples/pebble_segment_len", float(seg_len), self.step)
+        # self.clock.log_scalar("samples/pebble_pref_segment_steps", float(segment_steps), self.step)
+
+        # self.clock.log_scalar("true_reward/sample", self.true_episode_reward,(pref_sec / max(1, pairs))*len(self.labeled_feedback))
+        # self.clock.log_scalar("reward/sample", self.episode_reward,(pref_sec / max(1, pairs))*len(self.labeled_feedback))
+
+        # self.clock.log_scalar(
+        #     "clock/pebble_pref_sec_per_segment_step",
+        #     pref_sec / max(1, segment_steps),
+        #     self.step
+        # )
+        self.clock.flush()
         
         train_acc = 0
+        total_acc = 0.0
         if self.labeled_feedback > 0:
             # update reward
             for epoch in range(self.cfg.reward_update):
@@ -174,6 +251,9 @@ class Workspace(object):
         # store train returns of recent 10 episodes
         avg_train_true_return = deque([], maxlen=10) 
         start_time = time.time()
+        env_time_acc = 0.0
+        env_steps_acc = 0
+        ENV_LOG_EVERY = 1000
 
         interact_count = 0
         while self.step < self.cfg.num_train_steps:
@@ -191,6 +271,21 @@ class Workspace(object):
                 
                 self.logger.log('train/episode_reward', episode_reward, self.step)
                 self.logger.log('train/true_episode_reward', true_episode_reward, self.step)
+                
+                # rough clock timing
+                if self.labeled_feedback > self.last_logged_labeled_feedback:
+                    print("\nLogging to TB: total feedback", self.total_feedback, "labeled feedback", self.labeled_feedback, "pref time so far (sec)", self.pref_time_so_far_sec)
+                    x_ms = int(self.pref_time_so_far_sec * 1000)
+
+                    self.clock.log_scalar("1: true_reward/sample", true_episode_reward, x_ms)
+                    self.clock.log_scalar("1: reward/sample", episode_reward, x_ms)
+                    self.clock.flush()
+
+                    self.last_logged_labeled_feedback = self.labeled_feedback
+                
+                self.clock.log_scalar("2: true_reward/sample", true_episode_reward,int(((self.last_pref_sec / max(1, self.last_pref_pairs))*(self.labeled_feedback))))
+                self.clock.log_scalar("2: reward/sample", episode_reward,int(((self.last_pref_sec / max(1, self.last_pref_pairs))*(self.labeled_feedback))))
+                
                 self.logger.log('train/total_feedback', self.total_feedback, self.step)
                 self.logger.log('train/labeled_feedback', self.labeled_feedback, self.step)
                 
@@ -290,7 +385,18 @@ class Workspace(object):
                 self.agent.update_state_ent(self.replay_buffer, self.logger, self.step, 
                                             gradient_update=1, K=self.cfg.topK)
                 
+            # next_obs, reward, done, extra = self.env.step(action)
+            t0 = time.perf_counter()
             next_obs, reward, done, extra = self.env.step(action)
+            dt = time.perf_counter() - t0
+            env_time_acc += dt
+            env_steps_acc += 1
+            if env_steps_acc >= ENV_LOG_EVERY:
+                self.clock.log_scalar("clock/env_step_sec", env_time_acc / env_steps_acc, self.step)
+                self.clock.flush()
+                env_time_acc = 0.0
+                env_steps_acc = 0
+                
             reward_hat = self.reward_model.r_hat(np.concatenate([obs, action], axis=-1))
 
             # allow infinite bootstrap
