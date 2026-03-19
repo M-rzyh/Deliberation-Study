@@ -1,0 +1,122 @@
+[
+  {
+    "comparison_id": 1,
+    "video_a_path": "static/videos/walker_traj_a_1.mp4",
+    "video_b_path": "static/videos/walker_traj_b_1.mp4",
+    "reward_a": 24.383348992593085,
+    "reward_b": 33.42861772064467,
+    "reward_difference": 9.045268728051582,
+    "correct_choice": "B",
+    "difficulty": "Hard",
+    "frames_a": 50,
+    "frames_b": 50
+  },
+  {
+    "comparison_id": 2,
+    "video_a_path": "static/videos/walker_traj_a_2.mp4",
+    "video_b_path": "static/videos/walker_traj_b_2.mp4",
+    "reward_a": 11.596527300296936,
+    "reward_b": 18.23644231117272,
+    "reward_difference": 6.639915010875784,
+    "correct_choice": "B",
+    "difficulty": "Hard",
+    "frames_a": 50,
+    "frames_b": 50
+  },
+  {
+    "comparison_id": 3,
+    "video_a_path": "static/videos/walker_traj_a_3.mp4",
+    "video_b_path": "static/videos/walker_traj_b_3.mp4",
+    "reward_a": 48.20182292131864,
+    "reward_b": 53.129106836144494,
+    "reward_difference": 4.927283914825857,
+    "correct_choice": "B",
+    "difficulty": "Hard",
+    "frames_a": 50,
+    "frames_b": 50
+  },
+  {
+    "comparison_id": 4,
+    "video_a_path": "static/videos/walker_traj_a_4.mp4",
+    "video_b_path": "static/videos/walker_traj_b_4.mp4",
+    "reward_a": 31.978731452707724,
+    "reward_b": 36.84353951609419,
+    "reward_difference": 4.864808063386466,
+    "correct_choice": "B",
+    "difficulty": "Hard",
+    "frames_a": 50,
+    "frames_b": 50
+  },
+  {
+    "comparison_id": 5,
+    "video_a_path": "static/videos/walker_traj_a_5.mp4",
+    "video_b_path": "static/videos/walker_traj_b_5.mp4",
+    "reward_a": 22.35182079622018,
+    "reward_b": 35.49943108381988,
+    "reward_difference": 13.147610287599697,
+    "correct_choice": "B",
+    "difficulty": "Hard",
+    "frames_a": 50,
+    "frames_b": 50
+  },
+  {
+    "comparison_id": 6,
+    "video_a_path": "static/videos/walker_traj_a_6.mp4",
+    "video_b_path": "static/videos/walker_traj_b_6.mp4",
+    "reward_a": 28.47042785058065,
+    "reward_b": 14.351068640643186,
+    "reward_difference": 14.119359209937462,
+    "correct_choice": "A",
+    "difficulty": "Hard",
+    "frames_a": 50,
+    "frames_b": 50
+  },
+  {
+    "comparison_id": 7,
+    "video_a_path": "static/videos/walker_traj_a_7.mp4",
+    "video_b_path": "static/videos/walker_traj_b_7.mp4",
+    "reward_a": 68.23617374695499,
+    "reward_b": 43.31528911200198,
+    "reward_difference": 24.920884634953012,
+    "correct_choice": "A",
+    "difficulty": "Medium",
+    "frames_a": 50,
+    "frames_b": 50
+  },
+  {
+    "comparison_id": 8,
+    "video_a_path": "static/videos/walker_traj_a_8.mp4",
+    "video_b_path": "static/videos/walker_traj_b_8.mp4",
+    "reward_a": 36.406119775003134,
+    "reward_b": 38.31817579845822,
+    "reward_difference": 1.9120560234550865,
+    "correct_choice": "B",
+    "difficulty": "Hard",
+    "frames_a": 50,
+    "frames_b": 50
+  },
+  {
+    "comparison_id": 9,
+    "video_a_path": "static/videos/walker_traj_a_9.mp4",
+    "video_b_path": "static/videos/walker_traj_b_9.mp4",
+    "reward_a": 55.438732804280335,
+    "reward_b": 38.416834632056386,
+    "reward_difference": 17.02189817222395,
+    "correct_choice": "A",
+    "difficulty": "Hard",
+    "frames_a": 50,
+    "frames_b": 50
+  },
+  {
+    "comparison_id": 10,
+    "video_a_path": "static/videos/walker_traj_a_10.mp4",
+    "video_b_path": "static/videos/walker_traj_b_10.mp4",
+    "reward_a": 38.92133993521091,
+    "reward_b": 62.055809805806156,
+    "reward_difference": 23.134469870595247,
+    "correct_choice": "B",
+    "difficulty": "Medium",
+    "frames_a": 50,
+    "frames_b": 50
+  }
+]

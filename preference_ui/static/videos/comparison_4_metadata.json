@@ -1,0 +1,12 @@
+{
+  "comparison_id": 4,
+  "video_a_path": "static/videos/walker_traj_a_4.mp4",
+  "video_b_path": "static/videos/walker_traj_b_4.mp4",
+  "reward_a": 31.978731452707724,
+  "reward_b": 36.84353951609419,
+  "reward_difference": 4.864808063386466,
+  "correct_choice": "B",
+  "difficulty": "Hard",
+  "frames_a": 50,
+  "frames_b": 50
+}

@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PEBBLE Preference Collection - Walker2D</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header>
+            <h1>Which trajectory demonstrates better Walker2D behavior?</h1>
+            <div class="session-info">
+                <span id="participant-id">Participant: {{ participant_id }}</span>
+                <span id="comparison-count">Comparison: <span id="count">0</span></span>
+                <span id="condition-badge" class="condition-{{ condition }}">{{ condition }}</span>
+            </div>
+        </header>
+
+        <!-- Condition-specific message -->
+        <div id="condition-message" class="info-box" style="display: none;">
+            <!-- Populated by JavaScript based on condition -->
+        </div>
+
+        <!-- Timing display (only for transparent condition) -->
+        <div id="timing-display" class="timing-box" style="display: none;">
+            <div class="timer">
+                <span class="timer-label">Time on this comparison:</span>
+                <span id="elapsed-time" class="timer-value">0.0s</span>
+            </div>
+            <div class="timer-info">Your response time will be used to weight your feedback</div>
+        </div>
+
+        <!-- Main comparison area -->
+        <div class="comparison-container" id="comparison-area" style="display: none;">
+            <!-- Trajectory A -->
+            <div class="trajectory-panel">
+                <div class="trajectory-header">
+                    <h2>Trajectory A</h2>
+                    <button class="replay-btn" id="replay-a" disabled>
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/>
+                        </svg>
+                        Replay
+                    </button>
+                </div>
+                <div class="video-container">
+                    <video id="video-a" muted class="trajectory-video" preload="auto">
+                        Your browser does not support the video tag.
+                    </video>
+                    <div class="video-overlay" id="loading-a">
+                        <div class="spinner"></div>
+                        <p>Loading trajectory...</p>
+                    </div>
+                </div>
+                <div class="trajectory-stats" id="stats-a" style="display: none;">
+                    <span class="stat-label">Frames:</span>
+                    <span id="frames-a">0</span> |
+                    <span class="stat-label">Replays:</span>
+                    <span id="replay-count-a">0</span>
+                </div>
+            </div>
+
+            <!-- Trajectory B -->
+            <div class="trajectory-panel">
+                <div class="trajectory-header">
+                    <h2>Trajectory B</h2>
+                    <button class="replay-btn" id="replay-b" disabled>
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/>
+                        </svg>
+                        Replay
+                    </button>
+                </div>
+                <div class="video-container">
+                    <video id="video-b" muted class="trajectory-video" preload="auto">
+                        Your browser does not support the video tag.
+                    </video>
+                    <div class="video-overlay" id="loading-b">
+                        <div class="spinner"></div>
+                        <p>Loading trajectory...</p>
+                    </div>
+                </div>
+                <div class="trajectory-stats" id="stats-b" style="display: none;">
+                    <span class="stat-label">Frames:</span>
+                    <span id="frames-b">0</span> |
+                    <span class="stat-label">Replays:</span>
+                    <span id="replay-count-b">0</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Preference selection -->
+        <div class="preference-section" id="preference-section" style="display: none;">
+            <div class="preference-prompt">
+                <p class="prompt-text">Which trajectory is better?</p>
+                <div class="button-group">
+                    <button class="choice-btn" id="choose-a" data-choice="A">
+                        <span class="choice-label">A</span>
+                        <span class="choice-desc">Trajectory A is better</span>
+                    </button>
+                    <button class="choice-btn" id="choose-b" data-choice="B">
+                        <span class="choice-label">B</span>
+                        <span class="choice-desc">Trajectory B is better</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Confidence rating (shown after preference) -->
+        <div class="confidence-section" id="confidence-section" style="display: none;">
+            <div class="confidence-prompt">
+                <p class="prompt-text">How confident are you in your choice?</p>
+                <div class="confidence-scale">
+                    <div class="scale-labels">
+                        <span>Very Unsure</span>
+                        <span>Very Confident</span>
+                    </div>
+                    <div class="scale-buttons">
+                        <button class="confidence-btn" data-value="1">1<br><span class="conf-label">Guessing</span></button>
+                        <button class="confidence-btn" data-value="2">2<br><span class="conf-label">Unsure</span></button>
+                        <button class="confidence-btn" data-value="3">3<br><span class="conf-label">Moderate</span></button>
+                        <button class="confidence-btn" data-value="4">4<br><span class="conf-label">Confident</span></button>
+                        <button class="confidence-btn" data-value="5">5<br><span class="conf-label">Certain</span></button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Feedback message -->
+        <div class="feedback-message" id="feedback-message" style="display: none;">
+            <div class="feedback-content">
+                <span id="feedback-icon">✓</span>
+                <p id="feedback-text"></p>
+                <button class="next-btn" id="next-comparison">Next Comparison</button>
+            </div>
+        </div>
+
+        <!-- Loading screen -->
+        <div class="loading-screen" id="loading-screen">
+            <div class="spinner large"></div>
+            <p>Loading comparison...</p>
+        </div>
+    </div>
+
+    <!-- Debug panel (hidden by default) -->
+    <div class="debug-panel" id="debug-panel" style="display: none;">
+        <h3>Debug Info</h3>
+        <div id="debug-content"></div>
+        <button onclick="toggleDebug()">Close Debug</button>
+    </div>
+
+    <!-- Session summary modal -->
+    <div class="modal" id="summary-modal" style="display: none;">
+        <div class="modal-content">
+            <h2>Session Summary</h2>
+            <div id="summary-content"></div>
+            <button onclick="closeSummary()">Close</button>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
