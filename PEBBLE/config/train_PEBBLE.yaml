@@ -1,6 +1,5 @@
 defaults:
     - agent: sac
-    - _self_
     
 # this needs to be specified manually
 experiment: PEBBLE
@@ -26,6 +25,25 @@ teacher_gamma: 1
 teacher_eps_mistake: 0
 teacher_eps_skip: 0
 teacher_eps_equal: 0
+
+# offline human-feedback query logging
+collect_human_queries: true
+human_query_dir: human_queries
+human_query_separate_by_job_id: true
+human_query_job_id_env: SLURM_JOB_ID
+human_query_job_id: ''
+human_query_save_videos: true
+human_query_video_dir: ${human_query_dir}/videos
+human_query_video_env: walker_walk
+human_query_video_fps: 30
+human_query_video_width: 1280
+human_query_video_height: 720
+
+# use pre-collected human labels instead of synthetic/oracle labels
+use_offline_human_labels: false
+offline_human_query_dir: human_queries
+offline_human_labels_csv: ${offline_human_query_dir}/human_labels.csv
+offline_human_job_id: ''
 
 # scheduling
 reward_schedule: 0

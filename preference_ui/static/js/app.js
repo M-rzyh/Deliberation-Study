@@ -8,6 +8,7 @@ const APP_STATE = {
     currentComparison: null,
     condition: null,
     participantId: null,
+    sessionStarted: false,
     choiceMade: null,
     confidenceScore: null,
     replayCountA: 0,
@@ -30,9 +31,6 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Show condition-specific message
     showConditionMessage();
-    
-    // Load first comparison
-    loadNextComparison();
     
     // Set up event listeners
     setupEventListeners();
@@ -76,6 +74,28 @@ function showConditionMessage() {
 }
 
 function setupEventListeners() {
+    const startSessionBtn = document.getElementById('start-session-btn');
+    if (startSessionBtn) {
+        startSessionBtn.addEventListener('click', startSession);
+    }
+
+    const participantInput = document.getElementById('participant-name');
+    const sessionInput = document.getElementById('session-id-input');
+    if (participantInput && sessionInput) {
+        participantInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                sessionInput.focus();
+            }
+        });
+        sessionInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                startSession();
+            }
+        });
+    }
+
     // Replay buttons
     document.getElementById('replay-a').addEventListener('click', () => replayTrajectory('A'));
     document.getElementById('replay-b').addEventListener('click', () => replayTrajectory('B'));
@@ -110,7 +130,60 @@ function setupEventListeners() {
     document.addEventListener('click', markFirstInteraction, { once: true });
 }
 
+async function startSession() {
+    const participantInput = document.getElementById('participant-name');
+    const sessionInput = document.getElementById('session-id-input');
+
+    const participantId = (participantInput?.value || '').trim();
+    const sessionId = (sessionInput?.value || '').trim();
+
+    if (!participantId) {
+        alert('Please enter participant ID (human name) first.');
+        participantInput?.focus();
+        return;
+    }
+
+    if (!sessionId) {
+        alert('Please enter a session ID.');
+        sessionInput?.focus();
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/start_session', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                participant_id: participantId,
+                session_id: sessionId
+            })
+        });
+
+        const result = await response.json();
+        if (!response.ok || result.status !== 'success') {
+            throw new Error(result.message || 'Failed to start session');
+        }
+
+        APP_STATE.participantId = result.participant_id;
+        APP_STATE.sessionStarted = true;
+
+        document.getElementById('participant-id').textContent = `Participant: ${result.participant_id}`;
+        document.getElementById('session-setup-modal').style.display = 'none';
+
+        loadNextComparison();
+    } catch (error) {
+        console.error('Error starting session:', error);
+        alert(`Could not start session: ${error.message}`);
+    }
+}
+
 async function loadNextComparison() {
+    if (!APP_STATE.sessionStarted) {
+        return;
+    }
+
     console.log('📥 Loading next comparison...');
     
     // Reset state
@@ -135,6 +208,24 @@ async function loadNextComparison() {
     try {
         // Fetch comparison data
         const response = await fetch('/api/get_comparison');
+        if (response.status === 410) {
+            const done = await response.json();
+            document.getElementById('loading-screen').style.display = 'none';
+            document.getElementById('comparison-area').style.display = 'none';
+            document.getElementById('preference-section').style.display = 'none';
+            document.getElementById('confidence-section').style.display = 'none';
+
+            const feedbackMsg = document.getElementById('feedback-message');
+            const feedbackIcon = document.getElementById('feedback-icon');
+            const feedbackText = document.getElementById('feedback-text');
+            feedbackIcon.textContent = '✓';
+            feedbackIcon.style.color = '#4caf50';
+            feedbackText.innerHTML = `<strong>All done.</strong><br>${done.message || 'No more unlabeled queries.'}`;
+            document.getElementById('next-comparison').style.display = 'none';
+            feedbackMsg.style.display = 'block';
+            return;
+        }
+
         const data = await response.json();
         
         APP_STATE.currentComparison = data;

@@ -13,6 +13,8 @@ import math
 #import os
 #import sys
 import time
+import csv
+import glob
 import pickle as pkl
 import tqdm
 
@@ -23,6 +25,7 @@ from collections import deque
 
 import utils
 import hydra
+from human_query_logger import HumanQueryLogger
 
 class Workspace(object):
     def __init__(self, cfg):
@@ -67,13 +70,15 @@ class Workspace(object):
         else:
             self.env = utils.make_env(cfg)
         
-        cfg.agent.agent.obs_dim = self.env.observation_space.shape[0]
-        cfg.agent.agent.action_dim = self.env.action_space.shape[0]
-        cfg.agent.agent.action_range = [
+        agent_cfg = cfg.agent.agent if 'agent' in cfg.agent else cfg.agent
+        agent_params = agent_cfg.params if 'params' in agent_cfg else agent_cfg
+        agent_params.obs_dim = self.env.observation_space.shape[0]
+        agent_params.action_dim = self.env.action_space.shape[0]
+        agent_params.action_range = [
             float(self.env.action_space.low.min()),
             float(self.env.action_space.high.max())
         ]
-        self.agent = hydra.utils.instantiate(cfg.agent.agent)
+        self.agent = hydra.utils.instantiate(agent_cfg)
 
         self.replay_buffer = ReplayBuffer(
             self.env.observation_space.shape,
@@ -91,6 +96,48 @@ class Workspace(object):
         self.last_logged_labeled_feedback = 0
 
         # instantiating the reward model
+        self.query_logger = None
+        if getattr(cfg, 'collect_human_queries', False):
+            requested_job_id = str(getattr(cfg, 'human_query_job_id', '') or '').strip()
+            env_job_key = str(getattr(cfg, 'human_query_job_id_env', 'SLURM_JOB_ID'))
+            env_job_id = str(os.environ.get(env_job_key, '')).strip()
+            active_job_id = requested_job_id or env_job_id
+
+            base_query_dir = str(getattr(cfg, 'human_query_dir', 'human_queries'))
+            effective_query_dir = os.path.join(base_query_dir, active_job_id) if (
+                getattr(cfg, 'human_query_separate_by_job_id', False) and active_job_id
+            ) else base_query_dir
+
+            base_video_dir = str(getattr(cfg, 'human_query_video_dir', os.path.join(base_query_dir, 'videos')))
+            if (
+                getattr(cfg, 'human_query_separate_by_job_id', False)
+                and active_job_id
+                and base_video_dir.startswith(base_query_dir)
+            ):
+                suffix = base_video_dir[len(base_query_dir):].lstrip('/\\')
+                effective_video_dir = os.path.join(effective_query_dir, suffix) if suffix else effective_query_dir
+            else:
+                effective_video_dir = base_video_dir
+
+            print(f"[HumanQueryLogger] base_dir={base_query_dir} effective_dir={effective_query_dir}")
+            if active_job_id:
+                print(f"[HumanQueryLogger] job_id={active_job_id}")
+
+            self.query_logger = HumanQueryLogger(
+                save_dir=base_query_dir,
+                ds=self.env.observation_space.shape[0],
+                job_id=active_job_id,
+                separate_by_job_id=getattr(cfg, 'human_query_separate_by_job_id', False),
+                save_videos=getattr(cfg, 'human_query_save_videos', False),
+                video_dir=effective_video_dir,
+                video_env_name=getattr(cfg, 'human_query_video_env', 'walker_walk'),
+                video_fps=getattr(cfg, 'human_query_video_fps', 30),
+                video_size=(getattr(cfg, 'human_query_video_width', 1280), getattr(cfg, 'human_query_video_height', 720)),
+            )
+
+            self.offline_human_labels_loaded = False
+            self.offline_human_loaded_count = 0
+
         self.reward_model = RewardModel(
             self.env.observation_space.shape[0],
             self.env.action_space.shape[0],
@@ -105,7 +152,83 @@ class Workspace(object):
             teacher_gamma=cfg.teacher_gamma, 
             teacher_eps_mistake=cfg.teacher_eps_mistake, 
             teacher_eps_skip=cfg.teacher_eps_skip, 
-            teacher_eps_equal=cfg.teacher_eps_equal)
+            teacher_eps_equal=cfg.teacher_eps_equal,
+            query_logger=self.query_logger)
+
+    @staticmethod
+    def _parse_human_label(value):
+        s = str(value).strip().lower()
+        if s in ['a', '0', 'left']:
+            return 0
+        if s in ['b', '1', 'right']:
+            return 1
+        if s in ['-1', 'tie', 'equal', 'same']:
+            return -1
+        return None
+
+    def _load_offline_human_labels_once(self):
+        if self.offline_human_labels_loaded:
+            return 0
+
+        query_dir = str(self.cfg.offline_human_query_dir)
+        labels_csv = str(self.cfg.offline_human_labels_csv)
+
+        offline_job_id = str(getattr(self.cfg, 'offline_human_job_id', '') or '').strip()
+        if offline_job_id:
+            query_dir = os.path.join(query_dir, offline_job_id)
+            labels_basename = os.path.basename(labels_csv)
+            labels_csv = os.path.join(query_dir, labels_basename)
+            print(f"[offline_human] using job-scoped query_dir={query_dir}")
+            print(f"[offline_human] using labels_csv={labels_csv}")
+
+        if not os.path.exists(labels_csv):
+            raise FileNotFoundError(f"offline_human_labels_csv not found: {labels_csv}")
+
+        label_map = {}
+        with open(labels_csv, 'r', newline='') as f:
+            reader = csv.DictReader(f)
+            if 'query_id' not in reader.fieldnames or 'label' not in reader.fieldnames:
+                raise ValueError("offline_human_labels_csv must include columns: query_id,label")
+            for row in reader:
+                qid = str(row.get('query_id', '')).strip()
+                lbl = self._parse_human_label(row.get('label', ''))
+                if qid and lbl is not None:
+                    label_map[qid] = lbl
+
+        if len(label_map) == 0:
+            raise RuntimeError("No valid labels found in offline_human_labels_csv")
+
+        npz_files = sorted(glob.glob(os.path.join(query_dir, 'batches', '*.npz')))
+        if len(npz_files) == 0:
+            raise RuntimeError(f"No query batch files found under: {query_dir}/batches")
+
+        sa1_all, sa2_all, y_all = [], [], []
+        for npz_path in npz_files:
+            data = np.load(npz_path, allow_pickle=True)
+            query_ids = data['query_ids']
+            sa_t_1 = data['sa_t_1']
+            sa_t_2 = data['sa_t_2']
+
+            for i in range(len(query_ids)):
+                qid = str(query_ids[i])
+                if qid in label_map:
+                    sa1_all.append(sa_t_1[i])
+                    sa2_all.append(sa_t_2[i])
+                    y_all.append(label_map[qid])
+
+        if len(y_all) == 0:
+            raise RuntimeError("No labeled query_id matched any saved query batches")
+
+        sa1 = np.asarray(sa1_all, dtype=np.float32)
+        sa2 = np.asarray(sa2_all, dtype=np.float32)
+        labels = np.asarray(y_all, dtype=np.float32).reshape(-1, 1)
+
+        self.reward_model.put_queries(sa1, sa2, labels)
+        self.offline_human_labels_loaded = True
+        self.offline_human_loaded_count = len(labels)
+
+        print(f"Loaded offline human labels: {self.offline_human_loaded_count}")
+        return self.offline_human_loaded_count
         
     def evaluate(self):
         average_episode_reward = 0
@@ -156,26 +279,36 @@ class Workspace(object):
     def learn_reward(self, first_flag=0):
         # --- preference query generation + labeling timing ---
         labeled_queries, noisy_queries = 0, 0
-        with Timer() as  t_pref:
-            if first_flag == 1:
-                labeled_queries = self.reward_model.uniform_sampling()
-            else:
-                if self.cfg.feed_type == 0:
-                    labeled_queries = self.reward_model.uniform_sampling()
-                elif self.cfg.feed_type == 1:
-                    labeled_queries = self.reward_model.disagreement_sampling()
-                elif self.cfg.feed_type == 2:
-                    labeled_queries = self.reward_model.entropy_sampling()
-                elif self.cfg.feed_type == 3:
-                    labeled_queries = self.reward_model.kcenter_sampling()
-                elif self.cfg.feed_type == 4:
-                    labeled_queries = self.reward_model.kcenter_disagree_sampling()
-                elif self.cfg.feed_type == 5:
-                    labeled_queries = self.reward_model.kcenter_entropy_sampling()
-                else:
-                    raise NotImplementedError
+        if getattr(self.cfg, 'use_offline_human_labels', False):
+            with Timer() as t_pref:
+                newly_loaded = self._load_offline_human_labels_once()
+            pref_sec = t_pref.dt
 
-        pref_sec = t_pref.dt
+            if newly_loaded > 0:
+                self.total_feedback += int(newly_loaded)
+                self.labeled_feedback += int(newly_loaded)
+            labeled_queries = int(newly_loaded)
+        else:
+            with Timer() as  t_pref:
+                if first_flag == 1:
+                    labeled_queries = self.reward_model.uniform_sampling(train_step=self.step)
+                else:
+                    if self.cfg.feed_type == 0:
+                        labeled_queries = self.reward_model.uniform_sampling(train_step=self.step)
+                    elif self.cfg.feed_type == 1:
+                        labeled_queries = self.reward_model.disagreement_sampling(train_step=self.step)
+                    elif self.cfg.feed_type == 2:
+                        labeled_queries = self.reward_model.entropy_sampling(train_step=self.step)
+                    elif self.cfg.feed_type == 3:
+                        labeled_queries = self.reward_model.kcenter_sampling(train_step=self.step)
+                    elif self.cfg.feed_type == 4:
+                        labeled_queries = self.reward_model.kcenter_disagree_sampling(train_step=self.step)
+                    elif self.cfg.feed_type == 5:
+                        labeled_queries = self.reward_model.kcenter_entropy_sampling(train_step=self.step)
+                    else:
+                        raise NotImplementedError
+
+            pref_sec = t_pref.dt
         
         # # get feedbacks
         # labeled_queries, noisy_queries = 0, 0
@@ -198,8 +331,9 @@ class Workspace(object):
         #     else:
         #         raise NotImplementedError
         
-        self.total_feedback += self.reward_model.mb_size
-        self.labeled_feedback += labeled_queries
+        if not getattr(self.cfg, 'use_offline_human_labels', False):
+            self.total_feedback += self.reward_model.mb_size
+            self.labeled_feedback += labeled_queries
         query_number = self.total_feedback // self.cfg.reward_batch
         print(f"Total preference labels so far: {self.total_feedback}, Query number: {query_number}")
         
@@ -254,6 +388,7 @@ class Workspace(object):
         env_time_acc = 0.0
         env_steps_acc = 0
         ENV_LOG_EVERY = 1000
+        HEARTBEAT_EVERY = 1000
 
         interact_count = 0
         while self.step < self.cfg.num_train_steps:
@@ -418,55 +553,24 @@ class Workspace(object):
             episode_step += 1
             self.step += 1
             interact_count += 1
+
+            if self.step % HEARTBEAT_EVERY == 0:
+                print(
+                    f"[heartbeat] step={self.step} episode={episode} "
+                    f"ep_step={episode_step} total_feedback={self.total_feedback} "
+                    f"labeled_feedback={self.labeled_feedback}",
+                    flush=True,
+                )
             
         self.agent.save(self.work_dir, self.step)
         self.reward_model.save(self.work_dir, self.step)
+        if self.query_logger is not None:
+            self.query_logger.close()
     
-@hydra.main(config_path='config', config_name='train_PEBBLE', version_base=None)
+@hydra.main(config_path='config/train_PEBBLE.yaml', strict=True)
 def main(cfg):
     workspace = Workspace(cfg)
     workspace.run()
 
 if __name__ == '__main__':
     main()
-
-# At the end of your training script
-from trajectory_video_generator import TrajectoryVideoGenerator
-
-def export_comparisons_for_ui(reward_model, output_dir='../preference_ui/static/videos', num_comparisons=50):
-    """Export trajectory pairs as videos for UI"""
-    
-    # Get trajectory segments from reward model
-    sa_t_1, sa_t_2, r_t_1, r_t_2 = reward_model.get_queries(mb_size=num_comparisons)
-    
-    trajectory_pairs = []
-    
-    for i in range(num_comparisons):
-        # Extract states and actions
-        segment_a = sa_t_1[i]  # shape: (segment_length, obs_dim + action_dim)
-        segment_b = sa_t_2[i]
-        
-        # Split into states and actions
-        states_a = segment_a[:, :reward_model.ds]  # first ds dimensions
-        actions_a = segment_a[:, reward_model.ds:]  # rest are actions
-        
-        states_b = segment_b[:, :reward_model.ds]
-        actions_b = segment_b[:, reward_model.ds:]
-        
-        pair = {
-            'states_a': states_a,
-            'actions_a': actions_a,
-            'states_b': states_b,
-            'actions_b': actions_b
-        }
-        
-        trajectory_pairs.append(pair)
-    
-    # Generate videos
-    generator = TrajectoryVideoGenerator(env_name='Walker2d-v4')
-    generator.generate_comparison_videos(trajectory_pairs, output_dir=output_dir)
-    generator.close()
-    
-    print(f"✓ Exported {num_comparisons} comparisons to {output_dir}")
-
-# Call after training

@@ -22,6 +22,15 @@ CONFIG = {
     'data_dir': 'trajectory_data',
     'output_dir': 'preference_data',
     'video_dir': 'static/videos',
+    'use_query_bank': True,
+    'query_job_id': '',  # e.g., 4422468 (uses ../human_queries/{job_id}/...)
+    'query_root_dir': '../human_queries/{job_id}',
+    'query_manifest_csv': '../human_queries/{job_id}/query_manifest.csv',
+    # You can use placeholders: {participant_id}, {session_id}, {job_id}
+    # Example: ../human_queries/{job_id}/human_labels_{participant_id}_s{session_id}.csv
+    'query_labels_csv_template': '../human_queries/{job_id}/human_labels_{participant_id}_s{session_id}.csv',
+    'query_labels_csv': '../human_queries/human_labels_{participant_id}_s{session_id}.csv',
+    'skip_already_labeled': True,
     'participant_id': 'P01',  # Set this per participant
     'session_id': 1,
     'condition': 'baseline',  # baseline, time_aware_opaque, time_aware_transparent, explicit_confidence, revision_enabled
@@ -42,10 +51,165 @@ current_comparison = {
 
 comparison_queue = queue.Queue()
 results_log = []
+query_bank = []
+query_bank_index = 0
+logger = None
 
 # Ensure directories exist
 for dir_path in [CONFIG['data_dir'], CONFIG['output_dir'], CONFIG['video_dir']]:
     Path(dir_path).mkdir(parents=True, exist_ok=True)
+
+
+def _resolve_config_paths():
+    """Resolve template placeholders in configurable paths."""
+    def _fmt(v):
+        return str(v).format(
+            participant_id=CONFIG.get('participant_id', 'PXX'),
+            session_id=CONFIG.get('session_id', 1),
+            job_id=CONFIG.get('query_job_id', ''),
+        )
+
+    if 'query_root_dir' in CONFIG:
+        CONFIG['query_root_dir'] = _fmt(CONFIG['query_root_dir'])
+    if 'query_manifest_csv' in CONFIG:
+        CONFIG['query_manifest_csv'] = _fmt(CONFIG['query_manifest_csv'])
+
+    template = CONFIG.get('query_labels_csv_template', CONFIG.get('query_labels_csv', ''))
+    if template:
+        CONFIG['query_labels_csv'] = _fmt(template)
+
+    Path(CONFIG['query_root_dir']).mkdir(parents=True, exist_ok=True)
+
+
+def _normalize_rel_path(p):
+    return str(p).replace('\\', '/').lstrip('./')
+
+
+def _init_human_labels_csv(path):
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if not p.exists():
+        with open(p, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                'query_id',
+                'label',
+                'choice',
+                'confidence',
+                'confidence_method',
+                'participant_id',
+                'session_id',
+                'comparison_number',
+                'timestamp',
+                'condition',
+            ])
+
+
+def _load_existing_labeled_query_ids(path):
+    if not os.path.exists(path):
+        return set()
+    labeled = set()
+    with open(path, 'r', newline='') as f:
+        reader = csv.DictReader(f)
+        if not reader.fieldnames:
+            return labeled
+        if 'query_id' not in reader.fieldnames:
+            return labeled
+        for row in reader:
+            qid = str(row.get('query_id', '')).strip()
+            label = str(row.get('label', '')).strip()
+            if qid and label != '':
+                labeled.add(qid)
+    return labeled
+
+
+def _load_query_bank_from_manifest():
+    manifest_path = CONFIG['query_manifest_csv']
+    if not os.path.exists(manifest_path):
+        print(f"⚠️ Query manifest not found: {manifest_path}")
+        return []
+
+    labeled_ids = set()
+    if CONFIG.get('skip_already_labeled', True):
+        labeled_ids = _load_existing_labeled_query_ids(CONFIG['query_labels_csv'])
+
+    rows = []
+    with open(manifest_path, 'r', newline='') as f:
+        reader = csv.DictReader(f)
+        required = {'query_id', 'video_a_path', 'video_b_path'}
+        if not reader.fieldnames or not required.issubset(set(reader.fieldnames)):
+            raise ValueError(
+                f"Manifest must contain columns: {sorted(required)}. Got: {reader.fieldnames}"
+            )
+
+        for row in reader:
+            qid = str(row.get('query_id', '')).strip()
+            if not qid:
+                continue
+            if qid in labeled_ids:
+                continue
+
+            video_a_rel = _normalize_rel_path(row.get('video_a_path', ''))
+            video_b_rel = _normalize_rel_path(row.get('video_b_path', ''))
+            if not video_a_rel or not video_b_rel:
+                continue
+
+            row['video_a_path'] = video_a_rel
+            row['video_b_path'] = video_b_rel
+            rows.append(row)
+
+    print(f"Loaded query bank: {len(rows)} unlabeled queries")
+    return rows
+
+
+def _append_human_label(query_id, choice, confidence, confidence_method, comparison_number):
+    label_value = 0 if choice == 'A' else 1 if choice == 'B' else ''
+    with open(CONFIG['query_labels_csv'], 'a', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            query_id,
+            label_value,
+            choice,
+            confidence if confidence is not None else '',
+            confidence_method if confidence_method is not None else '',
+            CONFIG['participant_id'],
+            CONFIG['session_id'],
+            comparison_number,
+            datetime.now().isoformat(),
+            CONFIG['condition'],
+        ])
+
+
+def _initialize_runtime_state(reset_results=True):
+    global logger, query_bank, query_bank_index
+
+    _resolve_config_paths()
+
+    logger = ComparisonLogger(
+        CONFIG['output_dir'],
+        CONFIG['participant_id'],
+        CONFIG['session_id']
+    )
+
+    query_bank_index = 0
+    if CONFIG.get('use_query_bank', False):
+        _init_human_labels_csv(CONFIG['query_labels_csv'])
+        query_bank = _load_query_bank_from_manifest()
+    else:
+        query_bank = []
+
+    current_comparison['comparison_id'] = None
+    current_comparison['trajectory_a'] = None
+    current_comparison['trajectory_b'] = None
+    current_comparison['traj_a_reward'] = None
+    current_comparison['traj_b_reward'] = None
+    current_comparison['traj_a_video'] = None
+    current_comparison['traj_b_video'] = None
+    current_comparison['timestamps'] = {}
+    current_comparison['comparison_number'] = 0
+
+    if reset_results:
+        results_log.clear()
 
 
 class TimingTracker:
@@ -176,12 +340,7 @@ class ComparisonLogger:
         print(f"✓ Logged comparison {data['comparison_id']}")
 
 
-# Initialize logger
-logger = ComparisonLogger(
-    CONFIG['output_dir'],
-    CONFIG['participant_id'],
-    CONFIG['session_id']
-)
+_initialize_runtime_state(reset_results=True)
 
 
 @app.route('/')
@@ -190,6 +349,37 @@ def index():
     return render_template('index.html', 
                          condition=CONFIG['condition'],
                          participant_id=CONFIG['participant_id'])
+
+
+@app.route('/api/start_session', methods=['POST'])
+def start_session():
+    """Set participant/session values and reset runtime state for a new UI session."""
+    data = request.json or {}
+
+    participant_id = str(data.get('participant_id', '')).strip()
+    if not participant_id:
+        return jsonify({'status': 'error', 'message': 'participant_id is required'}), 400
+
+    raw_session = str(data.get('session_id', '')).strip()
+    if not raw_session:
+        return jsonify({'status': 'error', 'message': 'session_id is required'}), 400
+
+    try:
+        session_id = int(raw_session)
+    except ValueError:
+        return jsonify({'status': 'error', 'message': 'session_id must be an integer'}), 400
+
+    CONFIG['participant_id'] = participant_id
+    CONFIG['session_id'] = session_id
+    _initialize_runtime_state(reset_results=True)
+
+    return jsonify({
+        'status': 'success',
+        'participant_id': CONFIG['participant_id'],
+        'session_id': CONFIG['session_id'],
+        'query_labels_csv': CONFIG.get('query_labels_csv'),
+        'remaining_queries': len(query_bank),
+    })
 
 
 @app.route('/api/get_comparison', methods=['GET'])
@@ -214,44 +404,72 @@ def get_comparison():
     current_comparison['timing'] = TimingTracker(comparison_id)
     current_comparison['timing'].mark('comparison_created')
     
-    # Load trajectories (from queue or generate dummy data)
-    # In production, this would load from saved trajectory files
-    
-    # DUMMY DATA FOR DEMO - Replace with actual trajectory loading
-    traj_a_data = {
-        'id': f'traj_a_{comp_num}',
-        'video_path': f'/static/videos/walker_traj_a_{comp_num}.mp4',
-        'reward': np.random.uniform(200, 400),
-        'length': 50,  # timesteps
-    }
-    
-    traj_b_data = {
-        'id': f'traj_b_{comp_num}',
-        'video_path': f'/static/videos/walker_traj_b_{comp_num}.mp4',
-        'reward': np.random.uniform(200, 400),
-        'length': 50,  # timesteps
-    }
-    
-    current_comparison['trajectory_a'] = traj_a_data
-    current_comparison['trajectory_b'] = traj_b_data
-    current_comparison['traj_a_reward'] = traj_a_data['reward']
-    current_comparison['traj_b_reward'] = traj_b_data['reward']
-    
-    # Calculate ground truth
-    correct = 'A' if traj_a_data['reward'] > traj_b_data['reward'] else 'B'
-    reward_diff = abs(traj_a_data['reward'] - traj_b_data['reward'])
-    
-    # Categorize difficulty
-    if reward_diff > 50:
-        difficulty = 'Easy'
-    elif reward_diff > 20:
-        difficulty = 'Medium'
+    if CONFIG.get('use_query_bank', False):
+        global query_bank_index
+        if query_bank_index >= len(query_bank):
+            return jsonify({'status': 'complete', 'message': 'No more unlabeled queries'}), 410
+
+        q = query_bank[query_bank_index]
+        query_bank_index += 1
+        current_comparison['query_id'] = q['query_id']
+
+        traj_a_data = {
+            'id': f"{q['query_id']}_A",
+            'video_path': f"/query_media/{q['video_a_path']}",
+            'reward': None,
+            'length': int(q.get('segment_length', 50) or 50),
+        }
+
+        traj_b_data = {
+            'id': f"{q['query_id']}_B",
+            'video_path': f"/query_media/{q['video_b_path']}",
+            'reward': None,
+            'length': int(q.get('segment_length', 50) or 50),
+        }
+
+        current_comparison['trajectory_a'] = traj_a_data
+        current_comparison['trajectory_b'] = traj_b_data
+        current_comparison['traj_a_reward'] = None
+        current_comparison['traj_b_reward'] = None
+        current_comparison['correct_choice'] = None
+        current_comparison['difficulty'] = 'Unknown'
+        current_comparison['reward_difference'] = None
     else:
-        difficulty = 'Hard'
-    
-    current_comparison['correct_choice'] = correct
-    current_comparison['difficulty'] = difficulty
-    current_comparison['reward_difference'] = reward_diff
+        # DUMMY DATA FOR DEMO - Replace with actual trajectory loading
+        traj_a_data = {
+            'id': f'traj_a_{comp_num}',
+            'video_path': f'/static/videos/walker_traj_a_{comp_num}.mp4',
+            'reward': np.random.uniform(200, 400),
+            'length': 50,  # timesteps
+        }
+
+        traj_b_data = {
+            'id': f'traj_b_{comp_num}',
+            'video_path': f'/static/videos/walker_traj_b_{comp_num}.mp4',
+            'reward': np.random.uniform(200, 400),
+            'length': 50,  # timesteps
+        }
+
+        current_comparison['trajectory_a'] = traj_a_data
+        current_comparison['trajectory_b'] = traj_b_data
+        current_comparison['traj_a_reward'] = traj_a_data['reward']
+        current_comparison['traj_b_reward'] = traj_b_data['reward']
+
+        # Calculate ground truth
+        correct = 'A' if traj_a_data['reward'] > traj_b_data['reward'] else 'B'
+        reward_diff = abs(traj_a_data['reward'] - traj_b_data['reward'])
+
+        # Categorize difficulty
+        if reward_diff > 50:
+            difficulty = 'Easy'
+        elif reward_diff > 20:
+            difficulty = 'Medium'
+        else:
+            difficulty = 'Hard'
+
+        current_comparison['correct_choice'] = correct
+        current_comparison['difficulty'] = difficulty
+        current_comparison['reward_difference'] = reward_diff
     
     # Initialize replay counters
     current_comparison['replay_a_count'] = 0
@@ -317,8 +535,10 @@ def submit_preference():
     if not current_comparison['comparison_id']:
         return jsonify({'status': 'error', 'message': 'No active comparison'}), 400
     
-    # Calculate accuracy
-    accuracy = (choice == current_comparison['correct_choice'])
+    # Calculate accuracy (if available)
+    accuracy = None
+    if current_comparison.get('correct_choice') in ['A', 'B']:
+        accuracy = (choice == current_comparison['correct_choice'])
     
     # Get all timing data
     timing_data = current_comparison['timing'].to_dict()
@@ -376,6 +596,18 @@ def submit_preference():
     
     # Log to CSV
     logger.log_comparison(log_entry)
+
+    # Write offline human labels file (query_id,label,confidence,...) for PEBBLE training
+    if CONFIG.get('use_query_bank', False):
+        query_id = current_comparison.get('query_id')
+        if query_id:
+            _append_human_label(
+                query_id=query_id,
+                choice=choice,
+                confidence=confidence,
+                confidence_method=confidence_method,
+                comparison_number=current_comparison['comparison_number'],
+            )
     
     # Store in memory for session summary
     results_log.append(log_entry)
@@ -432,6 +664,12 @@ def serve_video(filename):
     return send_from_directory(CONFIG['video_dir'], filename)
 
 
+@app.route('/query_media/<path:filename>')
+def serve_query_media(filename):
+    """Serve query-bank videos from query root directory"""
+    return send_from_directory(CONFIG['query_root_dir'], filename)
+
+
 if __name__ == '__main__':
     print("\n" + "="*60)
     print("PEBBLE Preference Collection UI")
@@ -440,6 +678,10 @@ if __name__ == '__main__':
     print(f"Session ID: {CONFIG['session_id']}")
     print(f"Condition: {CONFIG['condition']}")
     print(f"Output: {logger.filename}")
+    if CONFIG.get('use_query_bank', False):
+        print(f"Query manifest: {CONFIG['query_manifest_csv']}")
+        print(f"Human labels output: {CONFIG['query_labels_csv']}")
+        print(f"Unlabeled queries available: {len(query_bank)}")
     print("="*60 + "\n")
     
     app.run(debug=True, host='0.0.0.0', port=5001)
