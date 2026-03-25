@@ -90,7 +90,8 @@ class RewardModel:
                  teacher_beta=-1, teacher_gamma=1, 
                  teacher_eps_mistake=0, 
                  teacher_eps_skip=0, 
-                 teacher_eps_equal=0):
+                 teacher_eps_equal=0,
+                 query_logger=None):
         
         # train data is trajectories, must process to sa and s..   
         self.ds = ds
@@ -139,6 +140,19 @@ class RewardModel:
         
         self.label_margin = label_margin
         self.label_target = 1 - 2*self.label_margin
+        self.query_logger = query_logger
+
+    def _record_queries_for_human(self, sa_t_1, sa_t_2, r_t_1=None, r_t_2=None, strategy='unknown', train_step=None):
+        if self.query_logger is None:
+            return
+        self.query_logger.log_batch(
+            sa_t_1=sa_t_1,
+            sa_t_2=sa_t_2,
+            r_t_1=r_t_1,
+            r_t_2=r_t_2,
+            train_step=train_step,
+            strategy=strategy,
+        )
     
     def softXEnt_loss(self, input, target):
         logprobs = torch.nn.functional.log_softmax (input, dim = 1)
@@ -422,7 +436,7 @@ class RewardModel:
         
         return sa_t_1, sa_t_2, r_t_1, r_t_2, labels
     
-    def kcenter_sampling(self):
+    def kcenter_sampling(self, train_step=None):
         
         # get queries
         num_init = self.mb_size*self.large_batch
@@ -447,6 +461,8 @@ class RewardModel:
         r_t_1, sa_t_1 = r_t_1[selected_index], sa_t_1[selected_index]
         r_t_2, sa_t_2 = r_t_2[selected_index], sa_t_2[selected_index]
         
+        self._record_queries_for_human(sa_t_1, sa_t_2, r_t_1=r_t_1, r_t_2=r_t_2, strategy='kcenter', train_step=train_step)
+
         # get labels
         sa_t_1, sa_t_2, r_t_1, r_t_2, labels = self.get_label(
             sa_t_1, sa_t_2, r_t_1, r_t_2)
@@ -456,7 +472,7 @@ class RewardModel:
         
         return len(labels)
     
-    def kcenter_disagree_sampling(self):
+    def kcenter_disagree_sampling(self, train_step=None):
         
         num_init = self.mb_size*self.large_batch
         num_init_half = int(num_init*0.5)
@@ -490,6 +506,8 @@ class RewardModel:
         r_t_1, sa_t_1 = r_t_1[selected_index], sa_t_1[selected_index]
         r_t_2, sa_t_2 = r_t_2[selected_index], sa_t_2[selected_index]
 
+        self._record_queries_for_human(sa_t_1, sa_t_2, r_t_1=r_t_1, r_t_2=r_t_2, strategy='kcenter_disagree', train_step=train_step)
+
         # get labels
         sa_t_1, sa_t_2, r_t_1, r_t_2, labels = self.get_label(
             sa_t_1, sa_t_2, r_t_1, r_t_2)
@@ -499,7 +517,7 @@ class RewardModel:
         
         return len(labels)
     
-    def kcenter_entropy_sampling(self):
+    def kcenter_entropy_sampling(self, train_step=None):
         
         num_init = self.mb_size*self.large_batch
         num_init_half = int(num_init*0.5)
@@ -534,6 +552,8 @@ class RewardModel:
         r_t_1, sa_t_1 = r_t_1[selected_index], sa_t_1[selected_index]
         r_t_2, sa_t_2 = r_t_2[selected_index], sa_t_2[selected_index]
 
+        self._record_queries_for_human(sa_t_1, sa_t_2, r_t_1=r_t_1, r_t_2=r_t_2, strategy='kcenter_entropy', train_step=train_step)
+
         # get labels
         sa_t_1, sa_t_2, r_t_1, r_t_2, labels = self.get_label(
             sa_t_1, sa_t_2, r_t_1, r_t_2)
@@ -543,10 +563,12 @@ class RewardModel:
         
         return len(labels)
     
-    def uniform_sampling(self):
+    def uniform_sampling(self, train_step=None):
         # get queries
         sa_t_1, sa_t_2, r_t_1, r_t_2 =  self.get_queries(
             mb_size=self.mb_size)
+
+        self._record_queries_for_human(sa_t_1, sa_t_2, r_t_1=r_t_1, r_t_2=r_t_2, strategy='uniform', train_step=train_step)
             
         # get labels
         sa_t_1, sa_t_2, r_t_1, r_t_2, labels = self.get_label(
@@ -557,7 +579,7 @@ class RewardModel:
         
         return len(labels)
     
-    def disagreement_sampling(self):
+    def disagreement_sampling(self, train_step=None):
         
         # get queries
         sa_t_1, sa_t_2, r_t_1, r_t_2 =  self.get_queries(
@@ -569,6 +591,8 @@ class RewardModel:
         r_t_1, sa_t_1 = r_t_1[top_k_index], sa_t_1[top_k_index]
         r_t_2, sa_t_2 = r_t_2[top_k_index], sa_t_2[top_k_index]        
         
+        self._record_queries_for_human(sa_t_1, sa_t_2, r_t_1=r_t_1, r_t_2=r_t_2, strategy='disagreement', train_step=train_step)
+
         # get labels
         sa_t_1, sa_t_2, r_t_1, r_t_2, labels = self.get_label(
             sa_t_1, sa_t_2, r_t_1, r_t_2)        
@@ -577,7 +601,7 @@ class RewardModel:
         
         return len(labels)
     
-    def entropy_sampling(self):
+    def entropy_sampling(self, train_step=None):
         
         # get queries
         sa_t_1, sa_t_2, r_t_1, r_t_2 =  self.get_queries(
@@ -590,6 +614,8 @@ class RewardModel:
         r_t_1, sa_t_1 = r_t_1[top_k_index], sa_t_1[top_k_index]
         r_t_2, sa_t_2 = r_t_2[top_k_index], sa_t_2[top_k_index]
         
+        self._record_queries_for_human(sa_t_1, sa_t_2, r_t_1=r_t_1, r_t_2=r_t_2, strategy='entropy', train_step=train_step)
+
         # get labels
         sa_t_1, sa_t_2, r_t_1, r_t_2, labels = self.get_label(    
             sa_t_1, sa_t_2, r_t_1, r_t_2)

@@ -18,7 +18,7 @@ for seed in 12345; do
     echo "COMPARE_RUN_DIR=$COMPARE_RUN_DIR"
 
     # print effective config (super useful for debugging)
-    python train_PEBBLE.py env=walker_walk seed=$seed feed_type=$FEED_TYPE num_train_steps=500000 --cfg job | egrep "^(env|seed|feed_type|device|num_train_steps|max_feedback|reward_batch|reward_update|num_interact|num_unsup_steps):"
+    python train_PEBBLE.py env=walker_walk seed=$seed feed_type=$FEED_TYPE num_train_steps=1000000 --cfg job | egrep "^(env|seed|feed_type|device|num_train_steps|max_feedback|reward_batch|reward_update|num_interact|num_unsup_steps):"
 
     python train_PEBBLE.py \
       env=walker_walk seed=$seed \
@@ -26,8 +26,8 @@ for seed in 12345; do
       agent.params.actor_lr=0.0005 agent.params.critic_lr=0.0005 \
       gradient_update=1 activation=tanh \
       num_unsup_steps=9000 num_train_steps=1000000\
-      num_interact=20000 max_feedback=250 \
-      reward_batch=50 reward_update=50 \
+      num_interact=20000 max_feedback=200 \
+      reward_batch=20 reward_update=20 \
       feed_type=$FEED_TYPE \
       teacher_beta=-1 teacher_gamma=1 teacher_eps_mistake=0 teacher_eps_skip=0 teacher_eps_equal=0
 

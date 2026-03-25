@@ -5,9 +5,19 @@ Converts trajectory state-action sequences to MP4 videos for UI
 Authors: Yang Guo & Marzieh Ghayour
 """
 
-import gymnasium as gym
+try:
+    import gymnasium as gym
+except ImportError:
+    import gym
+try:
+    import dmc2gym
+except ImportError:
+    dmc2gym = None
 import numpy as np
-import cv2
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 import os
 from pathlib import Path
 import json
@@ -17,7 +27,7 @@ from tqdm import tqdm
 class TrajectoryVideoGenerator:
     """Generate videos from Walker2D trajectories"""
     
-    def __init__(self, env_name='Walker2d-v4', video_fps=30, video_size=(640, 480)):
+    def __init__(self, env_name='Walker2d-v4', video_fps=30, video_size=(1280, 720)):
         """
         Args:
             env_name: Gymnasium environment name
@@ -28,8 +38,47 @@ class TrajectoryVideoGenerator:
         self.video_fps = video_fps
         self.video_size = video_size
         
-        # Create environment with rendering
-        self.env = gym.make(env_name, render_mode='rgb_array')
+        # Create environment with rendering (compatible with gymnasium, legacy gym, and dmc2gym)
+        self._legacy_render_mode = False
+        self._use_dmc2gym = False
+
+        # DMControl style env name, e.g. walker_walk
+        if '_' in env_name and dmc2gym is not None:
+            domain_name = env_name.split('_')[0]
+            task_name = '_'.join(env_name.split('_')[1:])
+            self.env = dmc2gym.make(
+                domain_name=domain_name,
+                task_name=task_name,
+                seed=1,
+                visualize_reward=False,
+            )
+            self._use_dmc2gym = True
+        else:
+            try:
+                self.env = gym.make(env_name, render_mode='rgb_array')
+            except TypeError:
+                self.env = gym.make(env_name)
+                self._legacy_render_mode = True
+
+    def _reset_env(self):
+        out = self.env.reset()
+        return out[0] if isinstance(out, tuple) else out
+
+    def _step_env(self, action):
+        out = self.env.step(action)
+        if isinstance(out, tuple) and len(out) == 5:
+            obs, reward, terminated, truncated, info = out
+            return obs, reward, terminated, truncated, info
+        obs, reward, done, info = out
+        return obs, reward, bool(done), False, info
+
+    def _render_frame(self):
+        if self._use_dmc2gym:
+            # dmc2gym legacy render API
+            return self.env.render(mode='rgb_array')
+        if self._legacy_render_mode:
+            return self.env.render(mode='rgb_array')
+        return self.env.render()
         
     def render_trajectory(self, states, actions):
         """
@@ -47,16 +96,29 @@ class TrajectoryVideoGenerator:
         total_reward = 0
         
         # Reset environment
-        obs, _ = self.env.reset()
+        obs = self._reset_env()
         
         # Execute trajectory
         for t in range(len(actions)):
             # Get frame before action
-            frame = self.env.render()
+            frame = self._render_frame()
             frames.append(frame)
             
             # Execute action
-            obs, reward, terminated, truncated, info = self.env.step(actions[t])
+            action = np.asarray(actions[t], dtype=np.float32)
+            if hasattr(self.env, 'action_space') and getattr(self.env.action_space, 'shape', None) is not None:
+                try:
+                    action = action.reshape(self.env.action_space.shape)
+                except Exception:
+                    pass
+                try:
+                    low = np.asarray(self.env.action_space.low, dtype=np.float32)
+                    high = np.asarray(self.env.action_space.high, dtype=np.float32)
+                    action = np.clip(action, low, high)
+                except Exception:
+                    pass
+
+            obs, reward, terminated, truncated, info = self._step_env(action)
             total_reward += reward
             
             if terminated or truncated:
@@ -80,26 +142,40 @@ class TrajectoryVideoGenerator:
         # Ensure output directory exists
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         
-        # Initialize video writer
-        fourcc_code = cv2.VideoWriter_fourcc(*fourcc)
-        out = cv2.VideoWriter(
-            output_path,
-            fourcc_code,
-            self.video_fps,
-            self.video_size
-        )
-        
-        for frame in frames:
-            # Convert RGB to BGR for OpenCV
-            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            
-            # Resize if needed
-            if frame_bgr.shape[:2][::-1] != self.video_size:
-                frame_bgr = cv2.resize(frame_bgr, self.video_size)
-            
-            out.write(frame_bgr)
-        
-        out.release()
+        if cv2 is not None:
+            # Initialize video writer
+            fourcc_code = cv2.VideoWriter_fourcc(*fourcc)
+            out = cv2.VideoWriter(
+                output_path,
+                fourcc_code,
+                self.video_fps,
+                self.video_size
+            )
+
+            for frame in frames:
+                # Convert RGB to BGR for OpenCV
+                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
+                # Resize if needed
+                if frame_bgr.shape[:2][::-1] != self.video_size:
+                    frame_bgr = cv2.resize(frame_bgr, self.video_size)
+
+                out.write(frame_bgr)
+
+            out.release()
+        else:
+            # Fallback when OpenCV is not available
+            try:
+                import imageio.v2 as imageio
+            except Exception as e:
+                raise ImportError(
+                    "Neither cv2 nor imageio is available for video writing. "
+                    "Install opencv-python/opencv-python-headless or imageio."
+                ) from e
+
+            # Keep frames as RGB for imageio
+            imageio.mimsave(output_path, frames, fps=self.video_fps)
+
         print(f"✓ Saved video: {output_path}")
     
     def generate_comparison_videos(self, 
@@ -242,6 +318,17 @@ def generate_dummy_trajectories(num_pairs=10, segment_length=50):
         trajectory_pairs: List of trajectory pairs
     """
     env = gym.make('Walker2d-v4')
+
+    def _reset_local(e):
+        out = e.reset()
+        return out[0] if isinstance(out, tuple) else out
+
+    def _step_local(e, action):
+        out = e.step(action)
+        if isinstance(out, tuple) and len(out) == 5:
+            return out
+        obs, reward, done, info = out
+        return obs, reward, bool(done), False, info
     
     trajectory_pairs = []
     
@@ -250,12 +337,12 @@ def generate_dummy_trajectories(num_pairs=10, segment_length=50):
         states_a = []
         actions_a = []
         
-        obs, _ = env.reset()
+        obs = _reset_local(env)
         for _ in range(segment_length):
             action = env.action_space.sample()  # Random action
             states_a.append(obs)
             actions_a.append(action)
-            obs, _, terminated, truncated, _ = env.step(action)
+            obs, _, terminated, truncated, _ = _step_local(env, action)
             
             if terminated or truncated:
                 obs, _ = env.reset()  # Reset instead of breaking
@@ -265,12 +352,12 @@ def generate_dummy_trajectories(num_pairs=10, segment_length=50):
         states_b = []
         actions_b = []
         
-        obs, _ = env.reset()
+        obs = _reset_local(env)
         for _ in range(segment_length):
             action = env.action_space.sample()
             states_b.append(obs)
             actions_b.append(action)
-            obs, _, terminated, truncated, _ = env.step(action)
+            obs, _, terminated, truncated, _ = _step_local(env, action)
             
             if terminated or truncated:
                 obs, _ = env.reset()  # Reset instead of breaking
