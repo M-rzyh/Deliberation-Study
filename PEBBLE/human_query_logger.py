@@ -6,6 +6,30 @@ from pathlib import Path
 import numpy as np
 
 
+MANIFEST_HEADERS = [
+    'query_id',
+    'batch_id',
+    'query_index_in_batch',
+    'train_step',
+    'strategy',
+    'npz_path',
+    'video_a_path',
+    'video_b_path',
+    'segment_length',
+    'traj_a_reward',
+    'traj_b_reward',
+    'reward_difference',
+    'higher_reward_trajectory',
+]
+
+LABEL_TEMPLATE_HEADERS = [
+    'query_id',
+    'label',
+    'confidence',
+    'notes',
+]
+
+
 class HumanQueryLogger:
     """Logs sampled preference queries so they can be labeled by humans later."""
 
@@ -100,32 +124,36 @@ class HumanQueryLogger:
                     self.video_generator = None
 
     def _init_csv_files(self):
-        if not self.manifest_csv.exists():
-            with open(self.manifest_csv, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    'query_id',
-                    'batch_id',
-                    'query_index_in_batch',
-                    'train_step',
-                    'strategy',
-                    'npz_path',
-                    'video_a_path',
-                    'video_b_path',
-                    'segment_length',
-                ])
+        self._ensure_csv_with_headers(self.manifest_csv, MANIFEST_HEADERS)
+        self._ensure_csv_with_headers(self.labels_template_csv, LABEL_TEMPLATE_HEADERS)
 
-        if not self.labels_template_csv.exists():
-            with open(self.labels_template_csv, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    'query_id',
-                    'label',
-                    'confidence',
-                    'notes',
-                ])
+    @staticmethod
+    def _ensure_csv_with_headers(path, headers):
+        if not path.exists():
+            with open(path, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=headers)
+                writer.writeheader()
+            return
 
-    def log_batch(self, sa_t_1, sa_t_2, train_step=None, strategy='unknown'):
+        with open(path, 'r', newline='') as f:
+            reader = csv.DictReader(f)
+            existing_headers = reader.fieldnames or []
+            rows = list(reader)
+
+        missing = [h for h in headers if h not in existing_headers]
+        if not missing:
+            return
+
+        tmp = path.with_suffix(path.suffix + '.tmp')
+        with open(tmp, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=headers)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({h: row.get(h, '') for h in headers})
+
+        tmp.replace(path)
+
+    def log_batch(self, sa_t_1, sa_t_2, r_t_1=None, r_t_2=None, train_step=None, strategy='unknown'):
         """
         Save one batch of sampled query pairs.
 
@@ -155,6 +183,8 @@ class HumanQueryLogger:
             query_ids=query_ids,
             sa_t_1=sa_t_1.astype(np.float32),
             sa_t_2=sa_t_2.astype(np.float32),
+            r_t_1=r_t_1.astype(np.float32) if r_t_1 is not None else np.array([], dtype=np.float32),
+            r_t_2=r_t_2.astype(np.float32) if r_t_2 is not None else np.array([], dtype=np.float32),
             train_step=np.array([train_step if train_step is not None else -1], dtype=np.int64),
             strategy=np.array([strategy]),
         )
@@ -189,26 +219,52 @@ class HumanQueryLogger:
                 video_a_rel = os.path.relpath(video_a_abs, self.save_dir)
                 video_b_rel = os.path.relpath(video_b_abs, self.save_dir)
 
-            manifest_rows.append([
-                qid,
-                batch_id,
-                i,
-                train_step if train_step is not None else '',
-                strategy,
-                os.path.relpath(npz_path, self.save_dir),
-                video_a_rel,
-                video_b_rel,
-                seg_len,
-            ])
+            traj_a_reward = ''
+            traj_b_reward = ''
+            reward_difference = ''
+            higher_reward_trajectory = ''
+            if r_t_1 is not None and r_t_2 is not None:
+                ra = float(np.sum(r_t_1[i]))
+                rb = float(np.sum(r_t_2[i]))
+                traj_a_reward = ra
+                traj_b_reward = rb
+                reward_difference = abs(ra - rb)
+                if ra > rb:
+                    higher_reward_trajectory = 'A'
+                elif rb > ra:
+                    higher_reward_trajectory = 'B'
+                else:
+                    higher_reward_trajectory = 'TIE'
 
-            label_rows.append([qid, '', '', ''])
+            manifest_rows.append({
+                'query_id': qid,
+                'batch_id': batch_id,
+                'query_index_in_batch': i,
+                'train_step': train_step if train_step is not None else '',
+                'strategy': strategy,
+                'npz_path': os.path.relpath(npz_path, self.save_dir),
+                'video_a_path': video_a_rel,
+                'video_b_path': video_b_rel,
+                'segment_length': seg_len,
+                'traj_a_reward': traj_a_reward,
+                'traj_b_reward': traj_b_reward,
+                'reward_difference': reward_difference,
+                'higher_reward_trajectory': higher_reward_trajectory,
+            })
+
+            label_rows.append({
+                'query_id': qid,
+                'label': '',
+                'confidence': '',
+                'notes': '',
+            })
 
         with open(self.manifest_csv, 'a', newline='') as f:
-            writer = csv.writer(f)
+            writer = csv.DictWriter(f, fieldnames=MANIFEST_HEADERS)
             writer.writerows(manifest_rows)
 
         with open(self.labels_template_csv, 'a', newline='') as f:
-            writer = csv.writer(f)
+            writer = csv.DictWriter(f, fieldnames=LABEL_TEMPLATE_HEADERS)
             writer.writerows(label_rows)
 
     def close(self):

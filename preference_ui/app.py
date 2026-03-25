@@ -23,14 +23,15 @@ CONFIG = {
     'output_dir': 'preference_data',
     'video_dir': 'static/videos',
     'use_query_bank': True,
-    'query_job_id': '',  # e.g., 4422468 (uses ../human_queries/{job_id}/...)
-    'query_root_dir': '../human_queries/{job_id}',
-    'query_manifest_csv': '../human_queries/{job_id}/query_manifest.csv',
+        'query_job_id': '4484717',  # e.g., 4432635[no reward was recireded]
+        'query_root_dir': '../PEBBLE/logs/human_queries/{job_id}',
+        'query_manifest_csv': '../PEBBLE/logs/human_queries/{job_id}/query_manifest.csv',
     # You can use placeholders: {participant_id}, {session_id}, {job_id}
     # Example: ../human_queries/{job_id}/human_labels_{participant_id}_s{session_id}.csv
-    'query_labels_csv_template': '../human_queries/{job_id}/human_labels_{participant_id}_s{session_id}.csv',
-    'query_labels_csv': '../human_queries/human_labels_{participant_id}_s{session_id}.csv',
+        'query_labels_csv_template': '../PEBBLE/logs/human_queries/{job_id}/human_labels_{participant_id}_s{session_id}.csv',
+        'query_labels_csv': '../PEBBLE/logs/human_queries/{job_id}/human_labels_{participant_id}_s{session_id}.csv',
     'skip_already_labeled': True,
+    'show_decision_timer_ui': True,  # True: show timer, False: record silently
     'participant_id': 'P01',  # Set this per participant
     'session_id': 1,
     'condition': 'baseline',  # baseline, time_aware_opaque, time_aware_transparent, explicit_confidence, revision_enabled
@@ -45,6 +46,7 @@ current_comparison = {
     'traj_b_reward': None,
     'traj_a_video': None,
     'traj_b_video': None,
+    'timing': None,
     'timestamps': {},
     'comparison_number': 0
 }
@@ -85,24 +87,84 @@ def _normalize_rel_path(p):
     return str(p).replace('\\', '/').lstrip('./')
 
 
+HUMAN_LABELS_HEADERS = [
+    'query_id',
+    'label',
+    'choice',
+    'confidence',
+    'confidence_method',
+    'participant_id',
+    'session_id',
+    'comparison_number',
+    'timestamp',
+    'condition',
+    'decision_time',
+    'replay_trajectory_a',
+    'replay_trajectory_b',
+    'traj_a_reward',
+    'traj_b_reward',
+    'higher_reward_trajectory',
+]
+
+
+def _parse_optional_float(value):
+    if value is None:
+        return None
+    s = str(value).strip()
+    if s == '':
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _manifest_reward(row, keys):
+    for key in keys:
+        if key in row:
+            v = _parse_optional_float(row.get(key))
+            if v is not None:
+                return v
+    return None
+
+
+def _manifest_choice(row, keys):
+    for key in keys:
+        if key in row:
+            s = str(row.get(key, '')).strip().upper()
+            if s in ['A', 'B']:
+                return s
+    return None
+
+
 def _init_human_labels_csv(path):
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     if not p.exists():
         with open(p, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow([
-                'query_id',
-                'label',
-                'choice',
-                'confidence',
-                'confidence_method',
-                'participant_id',
-                'session_id',
-                'comparison_number',
-                'timestamp',
-                'condition',
-            ])
+            writer.writerow(HUMAN_LABELS_HEADERS)
+        return
+
+    # Upgrade older files in place if new columns are missing.
+    with open(p, 'r', newline='') as f:
+        reader = csv.DictReader(f)
+        existing_headers = reader.fieldnames or []
+        rows = list(reader)
+
+    missing = [h for h in HUMAN_LABELS_HEADERS if h not in existing_headers]
+    if not missing:
+        return
+
+    tmp = p.with_suffix(p.suffix + '.tmp')
+    with open(tmp, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=HUMAN_LABELS_HEADERS)
+        writer.writeheader()
+        for row in rows:
+            out = {h: row.get(h, '') for h in HUMAN_LABELS_HEADERS}
+            writer.writerow(out)
+
+    tmp.replace(p)
 
 
 def _load_existing_labeled_query_ids(path):
@@ -162,22 +224,40 @@ def _load_query_bank_from_manifest():
     return rows
 
 
-def _append_human_label(query_id, choice, confidence, confidence_method, comparison_number):
+def _append_human_label(
+    query_id,
+    choice,
+    confidence,
+    confidence_method,
+    comparison_number,
+    decision_time=None,
+    replay_trajectory_a=0,
+    replay_trajectory_b=0,
+    traj_a_reward=None,
+    traj_b_reward=None,
+    higher_reward_trajectory=None,
+):
     label_value = 0 if choice == 'A' else 1 if choice == 'B' else ''
     with open(CONFIG['query_labels_csv'], 'a', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            query_id,
-            label_value,
-            choice,
-            confidence if confidence is not None else '',
-            confidence_method if confidence_method is not None else '',
-            CONFIG['participant_id'],
-            CONFIG['session_id'],
-            comparison_number,
-            datetime.now().isoformat(),
-            CONFIG['condition'],
-        ])
+        writer = csv.DictWriter(f, fieldnames=HUMAN_LABELS_HEADERS, extrasaction='ignore')
+        writer.writerow({
+            'query_id': query_id,
+            'label': label_value,
+            'choice': choice,
+            'confidence': confidence if confidence is not None else '',
+            'confidence_method': confidence_method if confidence_method is not None else '',
+            'participant_id': CONFIG['participant_id'],
+            'session_id': CONFIG['session_id'],
+            'comparison_number': comparison_number,
+            'timestamp': datetime.now().isoformat(),
+            'condition': CONFIG['condition'],
+            'decision_time': decision_time if decision_time is not None else '',
+            'replay_trajectory_a': replay_trajectory_a,
+            'replay_trajectory_b': replay_trajectory_b,
+            'traj_a_reward': traj_a_reward if traj_a_reward is not None else '',
+            'traj_b_reward': traj_b_reward if traj_b_reward is not None else '',
+            'higher_reward_trajectory': higher_reward_trajectory if higher_reward_trajectory is not None else '',
+        })
 
 
 def _initialize_runtime_state(reset_results=True):
@@ -205,6 +285,7 @@ def _initialize_runtime_state(reset_results=True):
     current_comparison['traj_b_reward'] = None
     current_comparison['traj_a_video'] = None
     current_comparison['traj_b_video'] = None
+    current_comparison['timing'] = None
     current_comparison['timestamps'] = {}
     current_comparison['comparison_number'] = 0
 
@@ -247,13 +328,17 @@ class TimingTracker:
         # Deliberation time (from prompt shown to preference selected)
         if 'prompt_shown' in self.events and 'preference_selected' in self.events:
             durations['deliberation_time'] = self.duration('prompt_shown', 'preference_selected')
+
+        # Decision time (from trajectories shown to preference selected)
+        if 'trajectories_shown' in self.events and 'preference_selected' in self.events:
+            durations['decision_time'] = self.duration('trajectories_shown', 'preference_selected')
         
         # Time to confidence report (from preference to confidence)
         if 'preference_selected' in self.events and 'confidence_submitted' in self.events:
             durations['confidence_reporting_time'] = self.duration('preference_selected', 'confidence_submitted')
         
         # Total replay time
-        replay_count = sum(1 for key in self.events if 'replay_' in key)
+        replay_count = sum(1 for key in self.events if 'replay_' in key and '_start_' in key)
         durations['replay_count'] = replay_count
         
         # Calculate time between first replay start and last replay end
@@ -311,7 +396,7 @@ class ComparisonLogger:
             'total_feedback_time',
             
             # Timing - Phases
-            'initial_viewing_time', 'deliberation_time', 
+            'initial_viewing_time', 'decision_time', 'deliberation_time', 
             'confidence_reporting_time', 'total_replay_time',
             
             # Replay behavior
@@ -348,7 +433,8 @@ def index():
     """Main comparison interface"""
     return render_template('index.html', 
                          condition=CONFIG['condition'],
-                         participant_id=CONFIG['participant_id'])
+                         participant_id=CONFIG['participant_id'],
+                         show_timer_ui=CONFIG.get('show_decision_timer_ui', True))
 
 
 @app.route('/api/start_session', methods=['POST'])
@@ -377,6 +463,7 @@ def start_session():
         'status': 'success',
         'participant_id': CONFIG['participant_id'],
         'session_id': CONFIG['session_id'],
+        'show_timer_ui': CONFIG.get('show_decision_timer_ui', True),
         'query_labels_csv': CONFIG.get('query_labels_csv'),
         'remaining_queries': len(query_bank),
     })
@@ -429,11 +516,31 @@ def get_comparison():
 
         current_comparison['trajectory_a'] = traj_a_data
         current_comparison['trajectory_b'] = traj_b_data
-        current_comparison['traj_a_reward'] = None
-        current_comparison['traj_b_reward'] = None
-        current_comparison['correct_choice'] = None
-        current_comparison['difficulty'] = 'Unknown'
-        current_comparison['reward_difference'] = None
+
+        # Optional ground-truth rewards/choice from manifest (if present)
+        reward_a = _manifest_reward(q, ['traj_a_reward', 'reward_a', 'r_a', 'return_a'])
+        reward_b = _manifest_reward(q, ['traj_b_reward', 'reward_b', 'r_b', 'return_b'])
+        correct_choice = _manifest_choice(q, ['correct_choice', 'higher_reward_trajectory', 'best'])
+
+        if correct_choice is None and reward_a is not None and reward_b is not None:
+            correct_choice = 'A' if reward_a > reward_b else 'B'
+
+        reward_diff = None
+        difficulty = 'Unknown'
+        if reward_a is not None and reward_b is not None:
+            reward_diff = abs(reward_a - reward_b)
+            if reward_diff > 50:
+                difficulty = 'Easy'
+            elif reward_diff > 20:
+                difficulty = 'Medium'
+            else:
+                difficulty = 'Hard'
+
+        current_comparison['traj_a_reward'] = reward_a
+        current_comparison['traj_b_reward'] = reward_b
+        current_comparison['correct_choice'] = correct_choice
+        current_comparison['difficulty'] = difficulty
+        current_comparison['reward_difference'] = reward_diff
     else:
         # DUMMY DATA FOR DEMO - Replace with actual trajectory loading
         traj_a_data = {
@@ -501,13 +608,14 @@ def mark_timing():
     data = request.json
     event_name = data.get('event')
     
-    if current_comparison['timing']:
-        current_comparison['timing'].mark(event_name)
+    timing = current_comparison.get('timing')
+    if timing:
+        timing.mark(event_name)
         
         # Track replay counts
-        if 'replay_a' in event_name:
+        if 'replay_a' in event_name and '_start_' in event_name:
             current_comparison['replay_a_count'] += 1
-        elif 'replay_b' in event_name:
+        elif 'replay_b' in event_name and '_start_' in event_name:
             current_comparison['replay_b_count'] += 1
         
         return jsonify({'status': 'success', 'event': event_name})
@@ -577,6 +685,7 @@ def submit_preference():
         
         # Timing - Phases
         'initial_viewing_time': durations.get('initial_viewing_time'),
+        'decision_time': durations.get('decision_time'),
         'deliberation_time': durations.get('deliberation_time'),
         'confidence_reporting_time': durations.get('confidence_reporting_time'),
         'total_replay_time': durations.get('total_replay_time'),
@@ -607,6 +716,12 @@ def submit_preference():
                 confidence=confidence,
                 confidence_method=confidence_method,
                 comparison_number=current_comparison['comparison_number'],
+                decision_time=durations.get('decision_time'),
+                replay_trajectory_a=current_comparison.get('replay_a_count', 0),
+                replay_trajectory_b=current_comparison.get('replay_b_count', 0),
+                traj_a_reward=current_comparison.get('traj_a_reward'),
+                traj_b_reward=current_comparison.get('traj_b_reward'),
+                higher_reward_trajectory=current_comparison.get('correct_choice'),
             )
     
     # Store in memory for session summary
@@ -634,6 +749,7 @@ def session_summary():
     accuracy_rate = correct_count / total_comparisons if total_comparisons > 0 else 0
     
     # Timing statistics
+    decision_times = [r['decision_time'] for r in results_log if r.get('decision_time') is not None]
     deliberation_times = [r['deliberation_time'] for r in results_log if r['deliberation_time']]
     total_feedback_times = [r['total_feedback_time'] for r in results_log if r['total_feedback_time']]
     replay_counts = [r['replay_count'] for r in results_log if r['replay_count'] is not None]
@@ -643,6 +759,9 @@ def session_summary():
         'correct_choices': correct_count,
         'accuracy_rate': f"{accuracy_rate:.1%}",
         
+        'avg_decision_time': f"{np.mean(decision_times):.2f}s" if decision_times else "N/A",
+        'median_decision_time': f"{np.median(decision_times):.2f}s" if decision_times else "N/A",
+
         'avg_deliberation_time': f"{np.mean(deliberation_times):.2f}s" if deliberation_times else "N/A",
         'median_deliberation_time': f"{np.median(deliberation_times):.2f}s" if deliberation_times else "N/A",
         'std_deliberation_time': f"{np.std(deliberation_times):.2f}s" if deliberation_times else "N/A",

@@ -142,12 +142,14 @@ class RewardModel:
         self.label_target = 1 - 2*self.label_margin
         self.query_logger = query_logger
 
-    def _record_queries_for_human(self, sa_t_1, sa_t_2, strategy='unknown', train_step=None):
+    def _record_queries_for_human(self, sa_t_1, sa_t_2, r_t_1=None, r_t_2=None, strategy='unknown', train_step=None):
         if self.query_logger is None:
             return
         self.query_logger.log_batch(
             sa_t_1=sa_t_1,
             sa_t_2=sa_t_2,
+            r_t_1=r_t_1,
+            r_t_2=r_t_2,
             train_step=train_step,
             strategy=strategy,
         )
@@ -459,7 +461,7 @@ class RewardModel:
         r_t_1, sa_t_1 = r_t_1[selected_index], sa_t_1[selected_index]
         r_t_2, sa_t_2 = r_t_2[selected_index], sa_t_2[selected_index]
         
-        self._record_queries_for_human(sa_t_1, sa_t_2, strategy='kcenter', train_step=train_step)
+        self._record_queries_for_human(sa_t_1, sa_t_2, r_t_1=r_t_1, r_t_2=r_t_2, strategy='kcenter', train_step=train_step)
 
         # get labels
         sa_t_1, sa_t_2, r_t_1, r_t_2, labels = self.get_label(
@@ -504,7 +506,7 @@ class RewardModel:
         r_t_1, sa_t_1 = r_t_1[selected_index], sa_t_1[selected_index]
         r_t_2, sa_t_2 = r_t_2[selected_index], sa_t_2[selected_index]
 
-        self._record_queries_for_human(sa_t_1, sa_t_2, strategy='kcenter_disagree', train_step=train_step)
+        self._record_queries_for_human(sa_t_1, sa_t_2, r_t_1=r_t_1, r_t_2=r_t_2, strategy='kcenter_disagree', train_step=train_step)
 
         # get labels
         sa_t_1, sa_t_2, r_t_1, r_t_2, labels = self.get_label(
@@ -550,7 +552,7 @@ class RewardModel:
         r_t_1, sa_t_1 = r_t_1[selected_index], sa_t_1[selected_index]
         r_t_2, sa_t_2 = r_t_2[selected_index], sa_t_2[selected_index]
 
-        self._record_queries_for_human(sa_t_1, sa_t_2, strategy='kcenter_entropy', train_step=train_step)
+        self._record_queries_for_human(sa_t_1, sa_t_2, r_t_1=r_t_1, r_t_2=r_t_2, strategy='kcenter_entropy', train_step=train_step)
 
         # get labels
         sa_t_1, sa_t_2, r_t_1, r_t_2, labels = self.get_label(
@@ -566,7 +568,7 @@ class RewardModel:
         sa_t_1, sa_t_2, r_t_1, r_t_2 =  self.get_queries(
             mb_size=self.mb_size)
 
-        self._record_queries_for_human(sa_t_1, sa_t_2, strategy='uniform', train_step=train_step)
+        self._record_queries_for_human(sa_t_1, sa_t_2, r_t_1=r_t_1, r_t_2=r_t_2, strategy='uniform', train_step=train_step)
             
         # get labels
         sa_t_1, sa_t_2, r_t_1, r_t_2, labels = self.get_label(
@@ -589,7 +591,7 @@ class RewardModel:
         r_t_1, sa_t_1 = r_t_1[top_k_index], sa_t_1[top_k_index]
         r_t_2, sa_t_2 = r_t_2[top_k_index], sa_t_2[top_k_index]        
         
-        self._record_queries_for_human(sa_t_1, sa_t_2, strategy='disagreement', train_step=train_step)
+        self._record_queries_for_human(sa_t_1, sa_t_2, r_t_1=r_t_1, r_t_2=r_t_2, strategy='disagreement', train_step=train_step)
 
         # get labels
         sa_t_1, sa_t_2, r_t_1, r_t_2, labels = self.get_label(
@@ -612,7 +614,7 @@ class RewardModel:
         r_t_1, sa_t_1 = r_t_1[top_k_index], sa_t_1[top_k_index]
         r_t_2, sa_t_2 = r_t_2[top_k_index], sa_t_2[top_k_index]
         
-        self._record_queries_for_human(sa_t_1, sa_t_2, strategy='entropy', train_step=train_step)
+        self._record_queries_for_human(sa_t_1, sa_t_2, r_t_1=r_t_1, r_t_2=r_t_2, strategy='entropy', train_step=train_step)
 
         # get labels
         sa_t_1, sa_t_2, r_t_1, r_t_2, labels = self.get_label(    

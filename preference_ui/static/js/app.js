@@ -15,12 +15,17 @@ const APP_STATE = {
     replayCountB: 0,
     timerInterval: null,
     startTime: null,
-    firstInteraction: false
+    firstInteraction: false,
+    promptShown: false,
+    showTimerUI: true
 };
 
 // Initialize application
 document.addEventListener('DOMContentLoaded', function() {
     console.log('🚀 PEBBLE UI Initialized');
+
+    const showTimerAttr = document.body?.dataset?.showTimerUi;
+    APP_STATE.showTimerUI = (showTimerAttr !== 'false');
     
     // Get condition from page
     const conditionBadge = document.getElementById('condition-badge');
@@ -46,6 +51,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
 function showConditionMessage() {
     const messageBox = document.getElementById('condition-message');
+    const timingBox = document.getElementById('timing-display');
     let message = '';
     
     switch(APP_STATE.condition) {
@@ -57,7 +63,6 @@ function showConditionMessage() {
             break;
         case 'time_aware_transparent':
             message = '<strong>Note:</strong> Your response time will affect how your feedback is used in training. Faster responses on clear choices and slower responses on difficult choices are both valuable!';
-            document.getElementById('timing-display').style.display = 'block';
             break;
         case 'explicit_confidence':
             message = 'After choosing, you will rate your confidence. Both certain and uncertain feedback is valuable!';
@@ -70,6 +75,11 @@ function showConditionMessage() {
     if (message) {
         messageBox.innerHTML = message;
         messageBox.style.display = 'block';
+    }
+
+    // Always show decision timer (trajectories shown -> A/B choice)
+    if (timingBox) {
+        timingBox.style.display = APP_STATE.showTimerUI ? 'block' : 'none';
     }
 }
 
@@ -167,6 +177,13 @@ async function startSession() {
         }
 
         APP_STATE.participantId = result.participant_id;
+        if (typeof result.show_timer_ui !== 'undefined') {
+            APP_STATE.showTimerUI = !!result.show_timer_ui;
+            const timingBox = document.getElementById('timing-display');
+            if (timingBox) {
+                timingBox.style.display = APP_STATE.showTimerUI ? 'block' : 'none';
+            }
+        }
         APP_STATE.sessionStarted = true;
 
         document.getElementById('participant-id').textContent = `Participant: ${result.participant_id}`;
@@ -192,6 +209,30 @@ async function loadNextComparison() {
     APP_STATE.replayCountA = 0;
     APP_STATE.replayCountB = 0;
     APP_STATE.firstInteraction = false;
+    APP_STATE.promptShown = false;
+
+    document.getElementById('elapsed-time').textContent = '0.0s';
+
+    // Reset choice button state from previous comparison
+    const chooseA = document.getElementById('choose-a');
+    const chooseB = document.getElementById('choose-b');
+    [chooseA, chooseB].forEach(btn => {
+        btn.disabled = false;
+        btn.style.background = '';
+        btn.style.borderColor = '';
+        btn.style.color = '';
+    });
+
+    // Reset confidence button state from previous comparison
+    document.querySelectorAll('.confidence-btn').forEach(btn => {
+        btn.disabled = false;
+        btn.style.background = '';
+        btn.style.borderColor = '';
+        btn.style.color = '';
+    });
+
+    // Ensure next button is visible during normal flow
+    document.getElementById('next-comparison').style.display = 'inline-block';
     
     // Show loading screen
     document.getElementById('loading-screen').style.display = 'flex';
@@ -204,6 +245,7 @@ async function loadNextComparison() {
     if (APP_STATE.timerInterval) {
         clearInterval(APP_STATE.timerInterval);
     }
+    APP_STATE.startTime = null;
     
     try {
         // Fetch comparison data
@@ -234,20 +276,12 @@ async function loadNextComparison() {
         // Update UI
         document.getElementById('count').textContent = data.comparison_number;
         
-        // Load videos
-        await loadTrajectories(data);
-        
-        // Mark timing: trajectories shown
-        await markTiming('trajectories_shown');
-        
-        // Start timer (for transparent condition)
-        if (APP_STATE.condition === 'time_aware_transparent') {
-            startTimer();
-        }
-        
         // Hide loading, show comparison
         document.getElementById('loading-screen').style.display = 'none';
         document.getElementById('comparison-area').style.display = 'grid';
+
+        // Load and play videos (visible to user)
+        await loadTrajectories(data);
         
     } catch (error) {
         console.error('Error loading comparison:', error);
@@ -264,6 +298,11 @@ async function loadTrajectories(data) {
     document.getElementById('loading-b').style.display = 'flex';
     
     // Set video sources
+    videoA.preload = 'auto';
+    videoB.preload = 'auto';
+    videoA.playsInline = true;
+    videoB.playsInline = true;
+
     videoA.src = data.trajectory_a.video_path;
     videoB.src = data.trajectory_b.video_path;
     
@@ -276,11 +315,34 @@ async function loadTrajectories(data) {
             videoB.addEventListener('loadeddata', resolve, { once: true });
         })
     ]);
-    
-    // Auto-play both videos
+
+    // Mark timing: trajectories shown (both videos ready and visible)
+    await markTiming('trajectories_shown');
+
+    // Start timer on the first actual playback event (autoplay or manual play)
+    const startTimerOnFirstPlay = () => {
+        if (!APP_STATE.startTime) {
+            startTimer();
+        }
+    };
+    videoA.addEventListener('play', startTimerOnFirstPlay, { once: true });
+    videoB.addEventListener('play', startTimerOnFirstPlay, { once: true });
+
+    // Play videos sequentially: A then B
     try {
+        videoA.currentTime = 0;
         await videoA.play();
+        await new Promise(resolve => {
+            videoA.addEventListener('ended', resolve, { once: true });
+        });
+
+        videoB.currentTime = 0;
         await videoB.play();
+        await new Promise(resolve => {
+            videoB.addEventListener('ended', resolve, { once: true });
+        });
+
+        showPreferencePrompt();
     } catch (error) {
         console.warn('Autoplay blocked, user must click play');
     }
@@ -306,18 +368,14 @@ function onVideoLoaded(trajectory) {
 
 function onVideoEnded(trajectory) {
     console.log(`Video ${trajectory} ended`);
-    
-    // Check if both videos have ended
-    const videoA = document.getElementById('video-a');
-    const videoB = document.getElementById('video-b');
-    
-    if (videoA.ended && videoB.ended && !APP_STATE.choiceMade) {
-        // Both videos finished, show preference prompt
-        showPreferencePrompt();
-    }
 }
 
 function showPreferencePrompt() {
+    if (APP_STATE.promptShown) {
+        return;
+    }
+    APP_STATE.promptShown = true;
+
     console.log('Showing preference prompt');
     
     // Mark timing: prompt shown
@@ -365,6 +423,11 @@ async function makeChoice(choice) {
     console.log(`✓ User chose: ${choice}`);
     
     APP_STATE.choiceMade = choice;
+
+    // Stop decision timer at A/B selection
+    if (APP_STATE.timerInterval) {
+        clearInterval(APP_STATE.timerInterval);
+    }
     
     // Mark timing: preference selected
     await markTiming('preference_selected');
@@ -503,6 +566,10 @@ function formatTimingSummary(timing) {
     
     if (timing.total_feedback_time) {
         summary += `Total time: ${timing.total_feedback_time.toFixed(1)}s`;
+    }
+
+    if (timing.decision_time) {
+        summary += ` | Decision: ${timing.decision_time.toFixed(1)}s`;
     }
     
     if (timing.deliberation_time) {

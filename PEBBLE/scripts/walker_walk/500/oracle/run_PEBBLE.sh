@@ -27,7 +27,7 @@ for seed in 12345; do
       gradient_update=1 activation=tanh \
       num_unsup_steps=9000 num_train_steps=1000000\
       num_interact=20000 max_feedback=200 \
-      reward_batch=20 reward_update=20 \
+      reward_batch=10 reward_update=10 \
       feed_type=$FEED_TYPE \
       teacher_beta=-1 teacher_gamma=1 teacher_eps_mistake=0 teacher_eps_skip=0 teacher_eps_equal=0
 
