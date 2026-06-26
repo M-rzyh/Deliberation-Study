@@ -43,7 +43,7 @@
         <!-- Timing display (only for transparent condition) -->
         <div id="timing-display" class="timing-box" style="display: none;">
             <div class="timer">
-                <span class="timer-label">Decision time (videos shown → A/B choice):</span>
+                <span class="timer-label">Decision time (videos shown → A/B/Skip choice):</span>
                 <span id="elapsed-time" class="timer-value">0.0s</span>
             </div>
         </div>
@@ -110,7 +110,7 @@
         <!-- Preference selection -->
         <div class="preference-section" id="preference-section" style="display: none;">
             <div class="preference-prompt">
-                <p class="prompt-text">Which trajectory is better?</p>
+                <p class="prompt-text">Which trajectory is better? (or skip this pair)</p>
                 <div class="button-group">
                     <button class="choice-btn" id="choose-a" data-choice="A">
                         <span class="choice-label">A</span>
@@ -119,6 +119,10 @@
                     <button class="choice-btn" id="choose-b" data-choice="B">
                         <span class="choice-label">B</span>
                         <span class="choice-desc">Trajectory B is better</span>
+                    </button>
+                    <button class="choice-btn" id="choose-skip" data-choice="SKIP">
+                        <span class="choice-label">-1</span>
+                        <span class="choice-desc">Skip this pair</span>
                     </button>
                 </div>
             </div>

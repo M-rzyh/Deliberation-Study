@@ -267,6 +267,12 @@ class HumanQueryLogger:
             writer = csv.DictWriter(f, fieldnames=LABEL_TEMPLATE_HEADERS)
             writer.writerows(label_rows)
 
+        return {
+            'batch_id': batch_id,
+            'query_ids': [str(qid) for qid in query_ids],
+            'npz_path': str(npz_path),
+        }
+
     def close(self):
         if self.video_generator is not None:
             self.video_generator.close()

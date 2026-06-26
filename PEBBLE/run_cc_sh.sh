@@ -5,8 +5,8 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=8G
 #SBATCH --time=04:30:00
-#SBATCH --output=logs/%x_%j.out
-#SBATCH --error=logs/%x_%j.err
+#SBATCH --output=logs/pebble/%x_%j.out
+#SBATCH --error=logs/pebble/%x_%j.err
 
 set -euo pipefail
 

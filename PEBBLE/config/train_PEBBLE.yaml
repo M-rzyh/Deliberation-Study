@@ -44,6 +44,17 @@ use_offline_human_labels: false
 offline_human_query_dir: human_queries
 offline_human_labels_csv: ${offline_human_query_dir}/human_labels.csv
 offline_human_job_id: ''
+offline_human_max_labels: 0
+offline_human_continue_with_synthetic: false
+
+# time-based sample weighting: none, linear, sqrt, log
+time_weight_strategy: none
+
+# ask for human labels during training (poll labels CSV while training runs)
+use_online_human_labels: false
+online_human_labels_csv: human_labels.csv
+online_human_poll_interval_sec: 5.0
+online_human_timeout_sec: 0.0
 
 # scheduling
 reward_schedule: 0
@@ -62,6 +73,10 @@ log_save_tb: true
 
 # video recorder
 save_video: false
+save_last_train_episode_videos: true
+last_train_video_count: 5
+last_train_video_fps: 30
+last_train_video_dir: train_episode_videos
 
 # setups
 seed: 1

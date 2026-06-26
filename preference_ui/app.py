@@ -23,9 +23,9 @@ CONFIG = {
     'output_dir': 'preference_data',
     'video_dir': 'static/videos',
     'use_query_bank': True,
-        'query_job_id': '4484717',  # e.g., 4432635[no reward was recireded]
+        'query_job_id': '4568316',  # e.g., 4432635[no reward was recireded]
         'query_root_dir': '../PEBBLE/logs/human_queries/{job_id}',
-        'query_manifest_csv': '../PEBBLE/logs/human_queries/{job_id}/query_manifest.csv',
+        'query_manifest_csv': '../PEBBLE/logs/human_queries/{job_id}/query_manifest_second500.csv',
     # You can use placeholders: {participant_id}, {session_id}, {job_id}
     # Example: ../human_queries/{job_id}/human_labels_{participant_id}_s{session_id}.csv
         'query_labels_csv_template': '../PEBBLE/logs/human_queries/{job_id}/human_labels_{participant_id}_s{session_id}.csv',
@@ -237,7 +237,7 @@ def _append_human_label(
     traj_b_reward=None,
     higher_reward_trajectory=None,
 ):
-    label_value = 0 if choice == 'A' else 1 if choice == 'B' else ''
+    label_value = 0 if choice == 'A' else 1 if choice == 'B' else -1 if choice == 'SKIP' else ''
     with open(CONFIG['query_labels_csv'], 'a', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=HUMAN_LABELS_HEADERS, extrasaction='ignore')
         writer.writerow({
@@ -630,7 +630,7 @@ def submit_preference():
     
     Expected JSON:
     {
-        "choice": "A" | "B",
+        "choice": "A" | "B" | "SKIP",
         "confidence": 1-5 (if applicable),
         "confidence_method": "explicit" | "implicit" | null
     }
@@ -639,13 +639,16 @@ def submit_preference():
     choice = data.get('choice')
     confidence = data.get('confidence', None)
     confidence_method = data.get('confidence_method', None)
+
+    if choice not in ['A', 'B', 'SKIP']:
+        return jsonify({'status': 'error', 'message': 'Invalid choice. Expected A, B, or SKIP.'}), 400
     
     if not current_comparison['comparison_id']:
         return jsonify({'status': 'error', 'message': 'No active comparison'}), 400
     
     # Calculate accuracy (if available)
     accuracy = None
-    if current_comparison.get('correct_choice') in ['A', 'B']:
+    if choice in ['A', 'B'] and current_comparison.get('correct_choice') in ['A', 'B']:
         accuracy = (choice == current_comparison['correct_choice'])
     
     # Get all timing data
@@ -726,12 +729,16 @@ def submit_preference():
     
     # Store in memory for session summary
     results_log.append(log_entry)
+    total_skipped = sum(1 for r in results_log if r.get('choice_made') == 'SKIP')
+    total_answered = len(results_log) - total_skipped
     
     return jsonify({
         'status': 'success',
         'comparison_id': current_comparison['comparison_id'],
         'accuracy': accuracy,
         'total_comparisons': len(results_log),
+        'total_skipped': total_skipped,
+        'total_answered': total_answered,
         'timing_summary': durations
     })
 
@@ -745,6 +752,8 @@ def session_summary():
     
     # Calculate summary statistics
     total_comparisons = len(results_log)
+    total_skipped = sum(1 for r in results_log if r.get('choice_made') == 'SKIP')
+    total_answered = total_comparisons - total_skipped
     correct_count = sum(1 for r in results_log if r['choice_accuracy'])
     accuracy_rate = correct_count / total_comparisons if total_comparisons > 0 else 0
     
@@ -756,6 +765,9 @@ def session_summary():
     
     summary = {
         'total_comparisons': total_comparisons,
+        'total_answered': total_answered,
+        'total_skipped': total_skipped,
+        'skip_rate': f"{(total_skipped / total_comparisons):.1%}" if total_comparisons > 0 else '0.0%',
         'correct_choices': correct_count,
         'accuracy_rate': f"{accuracy_rate:.1%}",
         

@@ -17,6 +17,7 @@ import csv
 import glob
 import pickle as pkl
 import tqdm
+import imageio
 
 from logger import Logger
 from replay_buffer import ReplayBuffer
@@ -97,6 +98,18 @@ class Workspace(object):
 
         # instantiating the reward model
         self.query_logger = None
+        # offline human-label loading state (must exist regardless of query collection mode)
+        # We cache all matched offline labels once, then inject them gradually in mb_size chunks
+        # to mimic online preference collection/update timing.
+        self.offline_human_labels_prepared = False
+        self.offline_human_loaded_count = 0
+        self.offline_human_next_index = 0
+        self.offline_sa1_all = None
+        self.offline_sa2_all = None
+        self.offline_y_all = None
+        self.online_human_labels_csv = str(getattr(cfg, 'online_human_labels_csv', '') or '').strip()
+        self.online_human_poll_interval_sec = float(getattr(cfg, 'online_human_poll_interval_sec', 5.0))
+        self.online_human_timeout_sec = float(getattr(cfg, 'online_human_timeout_sec', 0.0))
         if getattr(cfg, 'collect_human_queries', False):
             requested_job_id = str(getattr(cfg, 'human_query_job_id', '') or '').strip()
             env_job_key = str(getattr(cfg, 'human_query_job_id_env', 'SLURM_JOB_ID'))
@@ -135,8 +148,12 @@ class Workspace(object):
                 video_size=(getattr(cfg, 'human_query_video_width', 1280), getattr(cfg, 'human_query_video_height', 720)),
             )
 
-            self.offline_human_labels_loaded = False
-            self.offline_human_loaded_count = 0
+            if getattr(cfg, 'use_online_human_labels', False):
+                if not self.online_human_labels_csv:
+                    self.online_human_labels_csv = str(self.query_logger.labels_template_csv)
+                elif not os.path.isabs(self.online_human_labels_csv):
+                    self.online_human_labels_csv = os.path.join(str(self.query_logger.save_dir), self.online_human_labels_csv)
+                print(f"[online_human] labels_csv={self.online_human_labels_csv}")
 
         self.reward_model = RewardModel(
             self.env.observation_space.shape[0],
@@ -155,6 +172,63 @@ class Workspace(object):
             teacher_eps_equal=cfg.teacher_eps_equal,
             query_logger=self.query_logger)
 
+        # optional: save last few training episodes as reference videos
+        self.save_last_train_episode_videos = bool(getattr(cfg, 'save_last_train_episode_videos', False))
+        self.last_train_video_count = int(getattr(cfg, 'last_train_video_count', 5))
+        self.last_train_video_fps = int(getattr(cfg, 'last_train_video_fps', 30))
+        self.last_train_video_dir = os.path.join(
+            self.work_dir,
+            str(getattr(cfg, 'last_train_video_dir', 'train_episode_videos')),
+        )
+        self._current_episode_frames = []
+        self._capture_current_episode = False
+        self._max_episode_steps = utils.get_env_horizon(self.env, default=1000)
+        self._video_capture_start_step = max(
+            0,
+            int(self.cfg.num_train_steps) - self.last_train_video_count * self._max_episode_steps,
+        )
+        if self.save_last_train_episode_videos:
+            os.makedirs(self.last_train_video_dir, exist_ok=True)
+            print(
+                f"[train_video] enabled: saving last {self.last_train_video_count} training episodes "
+                f"to {self.last_train_video_dir}"
+            )
+
+    def _get_env_frame(self):
+        try:
+            frame = self.env.render(mode='rgb_array')
+        except TypeError:
+            frame = self.env.render()
+        except Exception:
+            return None
+
+        if frame is None:
+            return None
+        return np.asarray(frame)
+
+    def _append_episode_frame_if_needed(self):
+        if not self._capture_current_episode:
+            return
+        frame = self._get_env_frame()
+        if frame is not None:
+            self._current_episode_frames.append(frame)
+
+    def _save_episode_video_if_needed(self, episode_idx):
+        if not self._capture_current_episode:
+            return
+        if len(self._current_episode_frames) == 0:
+            return
+
+        video_path = os.path.join(
+            self.last_train_video_dir,
+            f"episode_{int(episode_idx):06d}_step_{int(self.step):07d}.mp4",
+        )
+        try:
+            imageio.mimsave(video_path, self._current_episode_frames, fps=self.last_train_video_fps)
+            print(f"[train_video] saved: {video_path}")
+        except Exception as e:
+            print(f"[train_video] WARNING: failed to save video {video_path}: {e}")
+
     @staticmethod
     def _parse_human_label(value):
         s = str(value).strip().lower()
@@ -166,9 +240,9 @@ class Workspace(object):
             return -1
         return None
 
-    def _load_offline_human_labels_once(self):
-        if self.offline_human_labels_loaded:
-            return 0
+    def _prepare_offline_human_labels_once(self):
+        if self.offline_human_labels_prepared:
+            return self.offline_human_loaded_count
 
         query_dir = str(self.cfg.offline_human_query_dir)
         labels_csv = str(self.cfg.offline_human_labels_csv)
@@ -185,6 +259,7 @@ class Workspace(object):
             raise FileNotFoundError(f"offline_human_labels_csv not found: {labels_csv}")
 
         label_map = {}
+        time_map = {}
         with open(labels_csv, 'r', newline='') as f:
             reader = csv.DictReader(f)
             if 'query_id' not in reader.fieldnames or 'label' not in reader.fieldnames:
@@ -194,6 +269,11 @@ class Workspace(object):
                 lbl = self._parse_human_label(row.get('label', ''))
                 if qid and lbl is not None:
                     label_map[qid] = lbl
+                    dt = row.get('decision_time', row.get('time_sec', ''))
+                    try:
+                        time_map[qid] = float(dt)
+                    except (ValueError, TypeError):
+                        time_map[qid] = None
 
         if len(label_map) == 0:
             raise RuntimeError("No valid labels found in offline_human_labels_csv")
@@ -202,12 +282,15 @@ class Workspace(object):
         if len(npz_files) == 0:
             raise RuntimeError(f"No query batch files found under: {query_dir}/batches")
 
-        sa1_all, sa2_all, y_all = [], [], []
+        seg_size = self.reward_model.size_segment
+        sa1_all, sa2_all, y_all, t_all, len1_all, len2_all = [], [], [], [], [], []
         for npz_path in npz_files:
             data = np.load(npz_path, allow_pickle=True)
             query_ids = data['query_ids']
             sa_t_1 = data['sa_t_1']
             sa_t_2 = data['sa_t_2']
+            npz_len1 = data['len_1'] if 'len_1' in data else None
+            npz_len2 = data['len_2'] if 'len_2' in data else None
 
             for i in range(len(query_ids)):
                 qid = str(query_ids[i])
@@ -215,6 +298,9 @@ class Workspace(object):
                     sa1_all.append(sa_t_1[i])
                     sa2_all.append(sa_t_2[i])
                     y_all.append(label_map[qid])
+                    t_all.append(time_map.get(qid))
+                    len1_all.append(int(npz_len1[i]) if npz_len1 is not None else seg_size)
+                    len2_all.append(int(npz_len2[i]) if npz_len2 is not None else seg_size)
 
         if len(y_all) == 0:
             raise RuntimeError("No labeled query_id matched any saved query batches")
@@ -223,12 +309,211 @@ class Workspace(object):
         sa2 = np.asarray(sa2_all, dtype=np.float32)
         labels = np.asarray(y_all, dtype=np.float32).reshape(-1, 1)
 
-        self.reward_model.put_queries(sa1, sa2, labels)
-        self.offline_human_labels_loaded = True
-        self.offline_human_loaded_count = len(labels)
+        # Compute time-based weights
+        strategy = str(getattr(self.cfg, 'time_weight_strategy', 'none')).strip().lower()
+        if strategy != 'none' and any(t is not None for t in t_all):
+            times = np.array([t if t is not None else np.nan for t in t_all], dtype=np.float32)
+            valid = ~np.isnan(times)
+            if valid.sum() > 0:
+                median_t = np.median(times[valid])
+                if strategy == 'linear':
+                    raw_w = times / median_t
+                elif strategy == 'sqrt':
+                    raw_w = np.sqrt(times) / np.sqrt(median_t)
+                elif strategy == 'log':
+                    raw_w = np.log1p(times) / np.log1p(median_t)
+                else:
+                    raw_w = np.ones_like(times)
+                raw_w[~valid] = 1.0
+                weights = (raw_w / np.mean(raw_w[valid])).reshape(-1, 1)
+                print(f"[time_weight] strategy={strategy}, median_time={median_t:.2f}s, "
+                      f"weight range=[{weights.min():.3f}, {weights.max():.3f}]")
+            else:
+                weights = np.ones((len(y_all), 1), dtype=np.float32)
+                print("[time_weight] no valid decision times found, using uniform weights")
+        else:
+            weights = np.ones((len(y_all), 1), dtype=np.float32)
+            if strategy != 'none':
+                print(f"[time_weight] strategy={strategy} but no timing data in CSV")
 
-        print(f"Loaded offline human labels: {self.offline_human_loaded_count}")
+        len1 = np.array(len1_all, dtype=np.int32)
+        len2 = np.array(len2_all, dtype=np.int32)
+
+        self.offline_sa1_all = sa1
+        self.offline_sa2_all = sa2
+        self.offline_y_all = labels
+        self.offline_weights_all = weights
+        self.offline_len1_all = len1
+        self.offline_len2_all = len2
+        self.offline_human_labels_prepared = True
+        self.offline_human_loaded_count = len(labels)
+        self.offline_human_next_index = 0
+
+        print(f"Loaded offline human labels (pool): {self.offline_human_loaded_count}")
         return self.offline_human_loaded_count
+
+    def _inject_offline_human_label_batch(self):
+        self._prepare_offline_human_labels_once()
+
+        if self.offline_human_next_index >= self.offline_human_loaded_count:
+            return 0
+
+        batch_size = int(max(1, self.reward_model.mb_size))
+        offline_budget = int(getattr(self.cfg, 'offline_human_max_labels', 0) or 0)
+        if offline_budget > 0:
+            budget_remaining = max(0, offline_budget - self.offline_human_next_index)
+            if budget_remaining <= 0:
+                return 0
+            batch_size = min(batch_size, budget_remaining)
+
+        start = self.offline_human_next_index
+        end = min(start + batch_size, self.offline_human_loaded_count)
+
+        self.reward_model.put_queries(
+            self.offline_sa1_all[start:end],
+            self.offline_sa2_all[start:end],
+            self.offline_y_all[start:end],
+            weights=self.offline_weights_all[start:end],
+            len_1=self.offline_len1_all[start:end],
+            len_2=self.offline_len2_all[start:end],
+        )
+        self.offline_human_next_index = end
+
+        injected = end - start
+        remaining = self.offline_human_loaded_count - self.offline_human_next_index
+        print(
+            f"Injected offline human labels batch: {injected} "
+            f"(total injected: {self.offline_human_next_index}/{self.offline_human_loaded_count}, "
+            f"remaining: {remaining})"
+        )
+        return injected
+
+    def _sample_synthetic_labels(self, first_flag=0):
+        if first_flag == 1:
+            return self.reward_model.uniform_sampling(train_step=self.step)
+
+        if self.cfg.feed_type == 0:
+            return self.reward_model.uniform_sampling(train_step=self.step)
+        elif self.cfg.feed_type == 1:
+            return self.reward_model.disagreement_sampling(train_step=self.step)
+        elif self.cfg.feed_type == 2:
+            return self.reward_model.entropy_sampling(train_step=self.step)
+        elif self.cfg.feed_type == 3:
+            return self.reward_model.kcenter_sampling(train_step=self.step)
+        elif self.cfg.feed_type == 4:
+            return self.reward_model.kcenter_disagree_sampling(train_step=self.step)
+        elif self.cfg.feed_type == 5:
+            return self.reward_model.kcenter_entropy_sampling(train_step=self.step)
+        else:
+            raise NotImplementedError
+
+    def _get_query_strategy(self, first_flag=0):
+        if first_flag == 1:
+            return 'uniform'
+
+        if self.cfg.feed_type == 0:
+            return 'uniform'
+        elif self.cfg.feed_type == 1:
+            return 'disagreement'
+        elif self.cfg.feed_type == 2:
+            return 'entropy'
+        elif self.cfg.feed_type == 3:
+            return 'kcenter'
+        elif self.cfg.feed_type == 4:
+            return 'kcenter_disagree'
+        elif self.cfg.feed_type == 5:
+            return 'kcenter_entropy'
+        else:
+            raise NotImplementedError
+
+    def _sample_online_human_labels(self, first_flag=0):
+        if self.query_logger is None:
+            raise RuntimeError('use_online_human_labels=true requires collect_human_queries=true')
+        if not self.online_human_labels_csv:
+            raise RuntimeError('online_human_labels_csv is required for online human labeling mode')
+
+        strategy = self._get_query_strategy(first_flag=first_flag)
+        sa_t_1, sa_t_2, query_ids = self.reward_model.sample_queries_for_human(
+            strategy=strategy,
+            train_step=self.step,
+        )
+
+        if len(query_ids) != len(sa_t_1):
+            print(
+                f"[online_human] WARNING: query_id count mismatch "
+                f"({len(query_ids)} ids for {len(sa_t_1)} queries); skipping this batch"
+            )
+            return 0
+
+        pending_ids = set(query_ids)
+        collected = {}
+        wait_start = time.time()
+        next_log_time = 0.0
+
+        while len(pending_ids) > 0:
+            if os.path.exists(self.online_human_labels_csv):
+                with open(self.online_human_labels_csv, 'r', newline='') as f:
+                    reader = csv.DictReader(f)
+                    if reader.fieldnames and 'query_id' in reader.fieldnames and 'label' in reader.fieldnames:
+                        for row in reader:
+                            qid = str(row.get('query_id', '')).strip()
+                            if qid not in pending_ids:
+                                continue
+                            lbl = self._parse_human_label(row.get('label', ''))
+                            if lbl is None:
+                                continue
+                            collected[qid] = lbl
+
+                for qid in list(pending_ids):
+                    if qid in collected:
+                        pending_ids.remove(qid)
+
+            if len(pending_ids) == 0:
+                break
+
+            elapsed = time.time() - wait_start
+            if self.online_human_timeout_sec > 0 and elapsed >= self.online_human_timeout_sec:
+                print(
+                    f"[online_human] timeout after {elapsed:.1f}s; "
+                    f"received {len(collected)}/{len(query_ids)} labels"
+                )
+                break
+
+            if elapsed >= next_log_time:
+                print(
+                    f"[online_human] waiting for labels in {self.online_human_labels_csv}: "
+                    f"{len(collected)}/{len(query_ids)} received"
+                )
+                next_log_time += 30.0
+
+            time.sleep(max(0.1, self.online_human_poll_interval_sec))
+
+        selected_indices = []
+        selected_labels = []
+        ties_or_invalid = 0
+        for idx, qid in enumerate(query_ids):
+            if qid not in collected:
+                continue
+            lbl = int(collected[qid])
+            if lbl not in (0, 1):
+                ties_or_invalid += 1
+                continue
+            selected_indices.append(idx)
+            selected_labels.append(lbl)
+
+        if ties_or_invalid > 0:
+            print(f"[online_human] skipped {ties_or_invalid} tie/invalid labels (expected 0 or 1)")
+
+        if len(selected_indices) == 0:
+            return 0
+
+        sa_selected_1 = sa_t_1[selected_indices]
+        sa_selected_2 = sa_t_2[selected_indices]
+        y_selected = np.asarray(selected_labels, dtype=np.float32).reshape(-1, 1)
+
+        self.reward_model.put_queries(sa_selected_1, sa_selected_2, y_selected)
+        print(f"[online_human] injected {len(selected_indices)} human labels")
+        return len(selected_indices)
         
     def evaluate(self):
         average_episode_reward = 0
@@ -279,34 +564,35 @@ class Workspace(object):
     def learn_reward(self, first_flag=0):
         # --- preference query generation + labeling timing ---
         labeled_queries, noisy_queries = 0, 0
-        if getattr(self.cfg, 'use_offline_human_labels', False):
+        used_synthetic = False
+        if getattr(self.cfg, 'use_online_human_labels', False):
             with Timer() as t_pref:
-                newly_loaded = self._load_offline_human_labels_once()
+                labeled_queries = int(self._sample_online_human_labels(first_flag=first_flag))
+            pref_sec = t_pref.dt
+
+            self.total_feedback += int(self.reward_model.mb_size)
+            self.labeled_feedback += int(labeled_queries)
+        elif getattr(self.cfg, 'use_offline_human_labels', False):
+            with Timer() as t_pref:
+                newly_loaded = self._inject_offline_human_label_batch()
+                if newly_loaded > 0:
+                    labeled_queries = int(newly_loaded)
+                elif getattr(self.cfg, 'offline_human_continue_with_synthetic', False):
+                    labeled_queries = int(self._sample_synthetic_labels(first_flag=first_flag))
+                    used_synthetic = True
+                    if labeled_queries > 0:
+                        print(f"[offline_human] exhausted/budget-reached, switching to synthetic labels: {labeled_queries}")
             pref_sec = t_pref.dt
 
             if newly_loaded > 0:
                 self.total_feedback += int(newly_loaded)
                 self.labeled_feedback += int(newly_loaded)
-            labeled_queries = int(newly_loaded)
+            elif used_synthetic:
+                self.total_feedback += self.reward_model.mb_size
+                self.labeled_feedback += labeled_queries
         else:
             with Timer() as  t_pref:
-                if first_flag == 1:
-                    labeled_queries = self.reward_model.uniform_sampling(train_step=self.step)
-                else:
-                    if self.cfg.feed_type == 0:
-                        labeled_queries = self.reward_model.uniform_sampling(train_step=self.step)
-                    elif self.cfg.feed_type == 1:
-                        labeled_queries = self.reward_model.disagreement_sampling(train_step=self.step)
-                    elif self.cfg.feed_type == 2:
-                        labeled_queries = self.reward_model.entropy_sampling(train_step=self.step)
-                    elif self.cfg.feed_type == 3:
-                        labeled_queries = self.reward_model.kcenter_sampling(train_step=self.step)
-                    elif self.cfg.feed_type == 4:
-                        labeled_queries = self.reward_model.kcenter_disagree_sampling(train_step=self.step)
-                    elif self.cfg.feed_type == 5:
-                        labeled_queries = self.reward_model.kcenter_entropy_sampling(train_step=self.step)
-                    else:
-                        raise NotImplementedError
+                labeled_queries = int(self._sample_synthetic_labels(first_flag=first_flag))
 
             pref_sec = t_pref.dt
         
@@ -331,7 +617,10 @@ class Workspace(object):
         #     else:
         #         raise NotImplementedError
         
-        if not getattr(self.cfg, 'use_offline_human_labels', False):
+        if (
+            (not getattr(self.cfg, 'use_offline_human_labels', False))
+            and (not getattr(self.cfg, 'use_online_human_labels', False))
+        ):
             self.total_feedback += self.reward_model.mb_size
             self.labeled_feedback += labeled_queries
         query_number = self.total_feedback // self.cfg.reward_batch
@@ -378,12 +667,14 @@ class Workspace(object):
 
     def run(self):
         episode, episode_reward, done = 0, 0, True
+        episode_step = 0
         if self.log_success:
             episode_success = 0
         true_episode_reward = 0
         
         # store train returns of recent 10 episodes
-        avg_train_true_return = deque([], maxlen=10) 
+        avg_train_true_return = deque([], maxlen=10)
+        avg_episode_length = deque([], maxlen=10)
         start_time = time.time()
         env_time_acc = 0.0
         env_steps_acc = 0
@@ -429,12 +720,18 @@ class Workspace(object):
                         self.step)
                     self.logger.log('train/true_episode_success', episode_success,
                         self.step)
+
+                if self.step > 0:
+                    self._save_episode_video_if_needed(episode)
+                    self._current_episode_frames = []
+                    self._capture_current_episode = False
                 
                 obs = self.env.reset()
                 # self.agent.reset()  # Not needed
                 done = False
                 episode_reward = 0
                 avg_train_true_return.append(true_episode_reward)
+                avg_episode_length.append(episode_step)
                 true_episode_reward = 0
                 if self.log_success:
                     episode_success = 0
@@ -442,6 +739,10 @@ class Workspace(object):
                 episode += 1
 
                 self.logger.log('train/episode', episode, self.step)
+
+                if self.save_last_train_episode_videos and self.step >= self._video_capture_start_step:
+                    self._capture_current_episode = True
+                    self._append_episode_frame_if_needed()
                         
             # sample action for data collection
             if self.step < self.cfg.num_seed_steps:
@@ -464,7 +765,9 @@ class Workspace(object):
                 self.reward_model.change_batch(frac)
                 
                 # update margin --> not necessary / will be updated soon
-                new_margin = np.mean(avg_train_true_return) * (self.cfg.segment / self.env._max_episode_steps)
+                _horizon = np.mean(avg_episode_length) if len(avg_episode_length) > 0 else max(1, int(self.cfg.segment))
+                _horizon = max(_horizon, 1)
+                new_margin = np.mean(avg_train_true_return) * (self.cfg.segment / _horizon)
                 self.reward_model.set_teacher_thres_skip(new_margin)
                 self.reward_model.set_teacher_thres_equal(new_margin)
                 
@@ -501,7 +804,9 @@ class Workspace(object):
                         self.reward_model.change_batch(frac)
                         
                         # update margin --> not necessary / will be updated soon
-                        new_margin = np.mean(avg_train_true_return) * (self.cfg.segment / self.env._max_episode_steps)
+                        _horizon = np.mean(avg_episode_length) if len(avg_episode_length) > 0 else max(1, int(self.cfg.segment))
+                        _horizon = max(_horizon, 1)
+                        new_margin = np.mean(avg_train_true_return) * (self.cfg.segment / _horizon)
                         self.reward_model.set_teacher_thres_skip(new_margin * self.cfg.teacher_eps_skip)
                         self.reward_model.set_teacher_thres_equal(new_margin * self.cfg.teacher_eps_equal)
                         
@@ -536,7 +841,10 @@ class Workspace(object):
 
             # allow infinite bootstrap
             done = float(done)
-            done_no_max = 0 if episode_step + 1 == self.env._max_episode_steps else done
+            if self._max_episode_steps is None:
+                done_no_max = done
+            else:
+                done_no_max = 0 if episode_step + 1 == self._max_episode_steps else done
             episode_reward += reward_hat
             true_episode_reward += reward
             
@@ -553,6 +861,7 @@ class Workspace(object):
             episode_step += 1
             self.step += 1
             interact_count += 1
+            self._append_episode_frame_if_needed()
 
             if self.step % HEARTBEAT_EVERY == 0:
                 print(
@@ -561,6 +870,9 @@ class Workspace(object):
                     f"labeled_feedback={self.labeled_feedback}",
                     flush=True,
                 )
+
+        if self._capture_current_episode and len(self._current_episode_frames) > 0:
+            self._save_episode_video_if_needed(episode)
             
         self.agent.save(self.work_dir, self.step)
         self.reward_model.save(self.work_dir, self.step)

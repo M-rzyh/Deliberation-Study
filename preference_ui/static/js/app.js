@@ -17,7 +17,8 @@ const APP_STATE = {
     startTime: null,
     firstInteraction: false,
     promptShown: false,
-    showTimerUI: true
+    showTimerUI: true,
+    sessionComplete: false
 };
 
 // Initialize application
@@ -113,6 +114,7 @@ function setupEventListeners() {
     // Choice buttons
     document.getElementById('choose-a').addEventListener('click', () => makeChoice('A'));
     document.getElementById('choose-b').addEventListener('click', () => makeChoice('B'));
+    document.getElementById('choose-skip').addEventListener('click', () => makeChoice('SKIP'));
     
     // Confidence buttons
     const confidenceBtns = document.querySelectorAll('.confidence-btn');
@@ -123,7 +125,7 @@ function setupEventListeners() {
     });
     
     // Next comparison button
-    document.getElementById('next-comparison').addEventListener('click', loadNextComparison);
+    document.getElementById('next-comparison').addEventListener('click', onNextButtonClick);
     
     // Video event listeners for timing
     const videoA = document.getElementById('video-a');
@@ -138,6 +140,30 @@ function setupEventListeners() {
     // Track first interaction (mouse movement or click)
     document.addEventListener('mousemove', markFirstInteraction, { once: true });
     document.addEventListener('click', markFirstInteraction, { once: true });
+}
+
+function openSessionSetupModal() {
+    const modal = document.getElementById('session-setup-modal');
+    if (modal) {
+        modal.style.display = 'flex';
+    }
+
+    // Suggest next session id
+    const sessionInput = document.getElementById('session-id-input');
+    if (sessionInput && APP_STATE.currentComparison?.comparison_number) {
+        const cur = parseInt(sessionInput.value || '1', 10);
+        if (!Number.isNaN(cur)) {
+            sessionInput.value = String(cur + 1);
+        }
+    }
+}
+
+function onNextButtonClick() {
+    if (APP_STATE.sessionComplete) {
+        openSessionSetupModal();
+        return;
+    }
+    loadNextComparison();
 }
 
 async function startSession() {
@@ -176,6 +202,16 @@ async function startSession() {
             throw new Error(result.message || 'Failed to start session');
         }
 
+        if ((result.remaining_queries ?? 0) <= 0) {
+            APP_STATE.sessionStarted = false;
+            APP_STATE.sessionComplete = true;
+            const sid = result.session_id ?? sessionId;
+            alert(`No unlabeled queries remain for participant ${result.participant_id}, session ${sid}. Choose a different session ID and try again.`);
+            sessionInput?.focus();
+            sessionInput?.select?.();
+            return;
+        }
+
         APP_STATE.participantId = result.participant_id;
         if (typeof result.show_timer_ui !== 'undefined') {
             APP_STATE.showTimerUI = !!result.show_timer_ui;
@@ -185,6 +221,11 @@ async function startSession() {
             }
         }
         APP_STATE.sessionStarted = true;
+        APP_STATE.sessionComplete = false;
+
+        const nextBtn = document.getElementById('next-comparison');
+        nextBtn.textContent = 'Next Comparison';
+        nextBtn.style.display = 'inline-block';
 
         document.getElementById('participant-id').textContent = `Participant: ${result.participant_id}`;
         document.getElementById('session-setup-modal').style.display = 'none';
@@ -216,7 +257,8 @@ async function loadNextComparison() {
     // Reset choice button state from previous comparison
     const chooseA = document.getElementById('choose-a');
     const chooseB = document.getElementById('choose-b');
-    [chooseA, chooseB].forEach(btn => {
+    const chooseSkip = document.getElementById('choose-skip');
+    [chooseA, chooseB, chooseSkip].forEach(btn => {
         btn.disabled = false;
         btn.style.background = '';
         btn.style.borderColor = '';
@@ -252,6 +294,8 @@ async function loadNextComparison() {
         const response = await fetch('/api/get_comparison');
         if (response.status === 410) {
             const done = await response.json();
+            APP_STATE.sessionComplete = true;
+            APP_STATE.sessionStarted = false;
             document.getElementById('loading-screen').style.display = 'none';
             document.getElementById('comparison-area').style.display = 'none';
             document.getElementById('preference-section').style.display = 'none';
@@ -263,7 +307,9 @@ async function loadNextComparison() {
             feedbackIcon.textContent = '✓';
             feedbackIcon.style.color = '#4caf50';
             feedbackText.innerHTML = `<strong>All done.</strong><br>${done.message || 'No more unlabeled queries.'}`;
-            document.getElementById('next-comparison').style.display = 'none';
+            const nextBtn = document.getElementById('next-comparison');
+            nextBtn.textContent = 'Start New Session';
+            nextBtn.style.display = 'inline-block';
             feedbackMsg.style.display = 'block';
             return;
         }
@@ -433,14 +479,22 @@ async function makeChoice(choice) {
     await markTiming('preference_selected');
     
     // Visual feedback
-    const chosenBtn = document.getElementById(`choose-${choice.toLowerCase()}`);
-    chosenBtn.style.background = '#4caf50';
-    chosenBtn.style.borderColor = '#4caf50';
-    chosenBtn.style.color = 'white';
+    const btnId = choice === 'SKIP' ? 'choose-skip' : `choose-${choice.toLowerCase()}`;
+    const chosenBtn = document.getElementById(btnId);
+    if (choice === 'SKIP') {
+        chosenBtn.style.background = '#f59e0b';
+        chosenBtn.style.borderColor = '#f59e0b';
+        chosenBtn.style.color = 'white';
+    } else {
+        chosenBtn.style.background = '#4caf50';
+        chosenBtn.style.borderColor = '#4caf50';
+        chosenBtn.style.color = 'white';
+    }
     
     // Disable both buttons
     document.getElementById('choose-a').disabled = true;
     document.getElementById('choose-b').disabled = true;
+    document.getElementById('choose-skip').disabled = true;
     
     // Wait a moment for visual feedback
     await new Promise(resolve => setTimeout(resolve, 500));
@@ -449,7 +503,9 @@ async function makeChoice(choice) {
     document.getElementById('preference-section').style.display = 'none';
     
     // Check if we need to show confidence rating
-    if (shouldShowConfidence()) {
+    if (choice === 'SKIP') {
+        await submitPreference(null, 'skipped');
+    } else if (shouldShowConfidence()) {
         showConfidencePrompt();
     } else {
         // Submit without confidence
@@ -536,13 +592,26 @@ function showFeedback(result) {
     const feedbackIcon = document.getElementById('feedback-icon');
     const feedbackText = document.getElementById('feedback-text');
     
-    // Customize feedback based on accuracy
-    if (result.accuracy) {
+    const skippedCount = Number(result.total_skipped || 0);
+    const skippedBadge = `<span style="display:inline-block;margin-top:8px;padding:4px 10px;border-radius:999px;background:#fff3cd;color:#8a6d3b;border:1px solid #ffe69c;font-size:12px;font-weight:600;">Skipped: ${skippedCount}</span>`;
+
+    // Customize feedback based on choice outcome
+    if (APP_STATE.choiceMade === 'SKIP') {
+        feedbackIcon.textContent = '-';
+        feedbackIcon.style.color = '#f59e0b';
+        feedbackText.innerHTML = `
+            <strong>Skipped pair recorded.</strong><br>
+            You have completed ${result.total_comparisons} comparison(s).<br>
+            ${skippedBadge}<br>
+            ${formatTimingSummary(result.timing_summary)}
+        `;
+    } else if (result.accuracy) {
         feedbackIcon.textContent = '✓';
         feedbackIcon.style.color = '#4caf50';
         feedbackText.innerHTML = `
             <strong>Correct!</strong><br>
             You have completed ${result.total_comparisons} comparison(s).<br>
+            ${skippedBadge}<br>
             ${formatTimingSummary(result.timing_summary)}
         `;
     } else {
@@ -551,12 +620,16 @@ function showFeedback(result) {
         feedbackText.innerHTML = `
             Comparison recorded.<br>
             You have completed ${result.total_comparisons} comparison(s).<br>
+            ${skippedBadge}<br>
             ${formatTimingSummary(result.timing_summary)}
         `;
     }
     
     feedbackMsg.style.display = 'block';
     feedbackMsg.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+    const nextBtn = document.getElementById('next-comparison');
+    nextBtn.textContent = 'Next Comparison';
 }
 
 function formatTimingSummary(timing) {
@@ -702,6 +775,13 @@ document.addEventListener('keydown', function(e) {
             makeChoice('B');
         }
     }
+
+    // '-' key - skip preference (label -1)
+    if (e.key === '-') {
+        if (APP_STATE.choiceMade === null && document.getElementById('preference-section').style.display !== 'none') {
+            makeChoice('SKIP');
+        }
+    }
     
     // 1-5 keys - confidence
     if (e.key >= '1' && e.key <= '5') {
@@ -714,7 +794,7 @@ document.addEventListener('keydown', function(e) {
     if (e.key === ' ' || e.key === 'Enter') {
         if (document.getElementById('feedback-message').style.display !== 'none') {
             e.preventDefault();
-            loadNextComparison();
+            onNextButtonClick();
         }
     }
     
@@ -729,6 +809,7 @@ document.addEventListener('keydown', function(e) {
 
 console.log('📱 Keyboard shortcuts enabled:');
 console.log('  A/B - Choose trajectory');
+console.log('  -   - Skip (label -1)');
 console.log('  1-5 - Confidence score');
 console.log('  Space/Enter - Next comparison');
 console.log('  Ctrl+S - Session summary');

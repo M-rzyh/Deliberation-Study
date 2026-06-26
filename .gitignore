@@ -56,3 +56,12 @@ figures
 figure/
 data/
 Miniconda3-latest-Linux-x86_64.sh
+
+# --- added 2026-06-26: exclude heavy archives & human-subject data ---
+*.tar.gz
+*.zip
+preference_ui/preference_data/
+human_queries/
+
+# generated analysis outputs (contain participant-named human-label results)
+PEBBLE/analysis/
